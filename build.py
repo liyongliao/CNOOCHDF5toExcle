@@ -36,7 +36,9 @@ def build_executable():
     # --name: 可执行文件名称
     # --windowed / --noconsole: 对于 FastAPI 服务类桌面应用，通常需要保留命令行以显示日志，因此不加 --noconsole
     cmd = [
-        "pyinstaller",
+        sys.executable,
+        "-m",
+        "PyInstaller",
         "--onefile",
         f"--add-data=static{separator}static",
         "--name=H5ToExcelConverter",
