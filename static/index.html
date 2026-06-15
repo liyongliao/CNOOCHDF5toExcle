@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>东方1-1气田井下压力转换工具</title>
+    <!-- 引入 Google Fonts Outfit 现代字体 -->
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="dark-theme">
+    <div class="app-container">
+        <!-- 头部导航栏 -->
+        <header class="app-header">
+            <div class="logo-area">
+                <span class="logo-icon">🌊</span>
+                <h1>东方1-1气田井下压力转换工具 <span class="badge" style="background: linear-gradient(135deg, #EE7F22, #ff9e49); box-shadow: 0 2px 8px rgba(238, 127, 34, 0.4); border: none;">中国海油 CNOOC</span></h1>
+            </div>
+            <div class="header-status">
+                <div class="status-indicator online"></div>
+                <span class="status-text">本地服务已联机</span>
+            </div>
+        </header>
+
+        <main class="app-content">
+            <!-- 侧边控制栏 -->
+            <section class="sidebar-panel card">
+                <div class="card-header">
+                    <h2>📂 工作区管理</h2>
+                </div>
+                
+                <div class="form-group">
+                    <label for="input-dir-path">源 H5 文件夹路径 / 文件路径</label>
+                    <div class="input-with-btn">
+                        <input type="text" id="input-dir-path" placeholder="例如: /Users/liyong/data" autocomplete="off">
+                        <button id="btn-browse-src" class="btn btn-secondary">浏览</button>
+                        <button id="btn-scan" class="btn btn-primary">扫描</button>
+                    </div>
+                    <span class="input-help">输入文件夹路径扫描目录下所有 H5 文件，或直接输入单个 H5 文件路径。</span>
+                </div>
+
+                <div class="form-group">
+                    <label for="output-dir-path">Excel 导出保存目录</label>
+                    <div class="input-with-btn">
+                        <input type="text" id="output-dir-path" placeholder="默认与源文件相同" autocomplete="off">
+                        <button id="btn-browse-out" class="btn btn-secondary">浏览</button>
+                    </div>
+                    <span class="input-help">生成的 Excel 文件将写入此文件夹中。</span>
+                </div>
+
+                <div class="divider"></div>
+
+                <div class="batch-action-area">
+                    <div class="batch-info">
+                        <div class="info-row">
+                            <span>已检测到文件:</span>
+                            <span id="stat-total-files" class="val">0</span>
+                        </div>
+                        <div class="info-row">
+                            <span>勾选导出文件:</span>
+                            <span id="stat-selected-files" class="val text-highlight">0</span>
+                        </div>
+                    </div>
+                    <button id="btn-start-batch" class="btn btn-success btn-large btn-block" disabled>
+                        🚀 开始多线程批量导出
+                    </button>
+                </div>
+            </section>
+
+            <!-- 主内容展示区 -->
+            <section class="main-panel">
+                <!-- 文件列表 -->
+                <div class="file-list-card card">
+                    <div class="card-header">
+                        <h2>📊 待处理 H5 文件列表</h2>
+                        <div class="header-actions" style="display: flex; align-items: center; gap: 8px;">
+                            <select id="select-preset-batch" class="form-control" style="width: 170px; padding: 4px 8px; height: 30px; font-size: 12px; border-radius: 4px; display: inline-block; background-color: var(--bg-input); border: 1px solid var(--border-color); color: var(--text-main);">
+                                <option value="">-- 批量应用常用配置 --</option>
+                            </select>
+                            <button id="btn-apply-preset-batch" class="btn btn-secondary btn-small" disabled>应用</button>
+                            <button id="btn-select-all" class="btn btn-secondary btn-small">全选</button>
+                            <button id="btn-select-none" class="btn btn-secondary btn-small">清空选择</button>
+                        </div>
+                    </div>
+                    <div class="file-list-wrapper">
+                        <table class="file-table" id="file-table">
+                            <thead>
+                                <tr>
+                                    <th width="50px">选择</th>
+                                    <th>文件名</th>
+                                    <th width="120px">大小</th>
+                                    <th width="260px">导出配置状态</th>
+                                    <th width="120px">操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="file-list-body">
+                                <tr>
+                                    <td colspan="5" class="empty-state">
+                                        <div class="empty-icon">📁</div>
+                                        <p>暂无文件，请在左侧输入路径并点击“扫描”</p>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- 导出进度监视器 -->
+                <div class="progress-card card" id="progress-container" style="display: none;">
+                    <div class="card-header">
+                        <h2>⚙️ 批量导出进度监控</h2>
+                        <span class="badge badge-pulse" id="progress-summary">处理中...</span>
+                    </div>
+                    <div class="progress-list" id="progress-list">
+                        <!-- 进度条动态插入 -->
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- H5 个性化配置模态框 (Modal) -->
+    <div class="modal-backdrop" id="config-modal">
+        <div class="modal-content card animate-scale">
+            <div class="modal-header">
+                <h3>🛠️ HDF5 导出个性化配置</h3>
+                <button class="btn-close" id="modal-close-btn">&times;</button>
+            </div>
+            
+            <div class="modal-body">
+                <div class="modal-file-info">
+                    <span class="info-label">当前配置 H5:</span>
+                    <span class="info-value text-highlight" id="modal-filename">filename.h5</span>
+                </div>
+
+                <div class="modal-tabs">
+                    <button class="tab-btn active" data-tab="tab-fields">1. 字段筛选</button>
+                    <button class="tab-btn" data-tab="tab-time">2. 时间与采样间隔</button>
+                    <button class="tab-btn" data-tab="tab-output">3. 导出命名</button>
+                </div>
+
+                <!-- 选项卡 1: 字段筛选 -->
+                <div class="tab-pane active" id="tab-fields">
+                    <div class="pane-header">
+                        <p class="pane-desc">请勾选需要导出的字段（不勾选的将不会出现在导出的 Excel 中）：</p>
+                        <div class="pane-actions">
+                            <select id="select-preset-template" class="form-control" style="width: 180px; padding: 4px 8px; height: 30px; font-size: 12px; border-radius: 4px;">
+                                <option value="">-- 应用常用字段配置 --</option>
+                            </select>
+                            <button class="btn btn-secondary btn-small" id="btn-save-preset" title="将当前勾选保存为常用配置">💾 保存常用</button>
+                            <button class="btn btn-secondary btn-small btn-danger" id="btn-delete-preset" title="删除该常用配置" style="display: none; background-color: var(--danger); border-color: var(--danger); color: white;">🗑️</button>
+                            <button class="btn btn-secondary btn-small" id="btn-fields-all">全选</button>
+                            <button class="btn btn-secondary btn-small" id="btn-fields-none">全不选</button>
+                        </div>
+                    </div>
+                    
+                    <!-- 字段搜索过滤框 -->
+                    <div class="field-search-box" style="margin: 0 0 16px 0; display: flex; gap: 8px;">
+                        <input type="text" id="input-field-search" class="form-control" placeholder="🔍 输入关键字过滤字段 (例如: pres, temp, channel)..." style="flex: 1; padding: 6px 12px; border-radius: 4px; border: 1px solid var(--border-color); background-color: var(--bg-input); color: var(--text-main);">
+                        <button class="btn btn-secondary btn-small" id="btn-clear-search" style="padding: 6px 12px; height: 32px; white-space: nowrap;">清空</button>
+                    </div>
+
+                    <div class="fields-grid" id="fields-container">
+                        <!-- 动态加载 H5 字段 -->
+                    </div>
+                </div>
+
+                <!-- 选项卡 2: 时间与采样间隔 -->
+                <div class="tab-pane" id="tab-time">
+                    <div class="form-row" style="display: none;">
+                        <div class="form-group col-6">
+                            <label for="select-time-col">选择时间列 / 索引列</label>
+                            <select id="select-time-col" class="form-control">
+                                <option value="">无时间列 (仅按物理行导出)</option>
+                            </select>
+                            <span class="input-help">我们将基于此列进行起止时间过滤与重采样。</span>
+                        </div>
+                        <div class="form-group col-6">
+                            <label for="select-time-type">时间列数据类型</label>
+                            <select id="select-time-type" class="form-control" disabled>
+                                <option value="timestamp_seconds">Unix 时间戳 (秒)</option>
+                                <option value="timestamp_ms">Unix 时间戳 (毫秒)</option>
+                                <option value="relative_seconds">相对秒数 (自测试开始)</option>
+                                <option value="string">格式化时间字符串</option>
+                            </select>
+                        </div>
+                    </div>
+                    
+                    <div class="form-row">
+                        <div class="form-group col-6">
+                            <label for="select-temp-unit">温度展示单位 (Temperature Unit)</label>
+                            <select id="select-temp-unit" class="form-control">
+                                <option value="degC">degC (摄氏度)</option>
+                                <option value="degF">degF (华氏度)</option>
+                                <option value="K">°K (开尔文)</option>
+                            </select>
+                        </div>
+                        <div class="form-group col-6">
+                            <label for="select-pres-unit">压力展示单位 (Pressure Unit)</label>
+                            <select id="select-pres-unit" class="form-control">
+                                <option value="PSI">PSI (磅/平方英寸)</option>
+                                <option value="Pa">Pa (帕斯卡)</option>
+                                <option value="bar">bar (巴)</option>
+                                <option value="MPa">MPa (兆帕)</option>
+                            </select>
+                        </div>
+                    </div>
+
+
+                    <!-- 相对时间基准配置 -->
+                    <div class="form-group" id="group-base-date" style="display: none;">
+                        <label for="input-base-date">相对时间基准日期 (Base Datetime)</label>
+                        <input type="text" id="input-base-date" class="form-control" placeholder="YYYY-MM-DD HH:MM:SS" value="2026-06-15 00:00:00">
+                        <span class="input-help">由于原数据为相对秒数 (如 0, 1, 2...)，请指定该文件的测试启动时间，以将其换算为 Excel 的日期时间。</span>
+                    </div>
+
+                    <!-- 时间区间选择 -->
+                    <div class="time-range-group" id="time-range-container">
+                        <h4 class="sub-title">🕒 导出日期区间筛选</h4>
+                        <div class="file-time-span">
+                            <span>文件提供的时间跨度:</span>
+                            <span id="txt-file-time-span" class="text-highlight">无</span>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group col-6">
+                                <label for="input-start-time">导出起始时间</label>
+                                <input type="text" id="input-start-time" class="form-control" placeholder="YYYY-MM-DD HH:MM:SS">
+                            </div>
+                            <div class="form-group col-6">
+                                <label for="input-end-time">导出结束时间</label>
+                                <input type="text" id="input-end-time" class="form-control" placeholder="YYYY-MM-DD HH:MM:SS">
+                            </div>
+                        </div>
+                        <span class="input-help">默认加载最大时间跨度。您可以修改起止时间来裁剪导出范围。</span>
+                    </div>
+
+                    <!-- 采样间隔设置 -->
+                    <div class="form-group">
+                        <label for="input-interval">采样/重采样时间间隔 (秒)</label>
+                        <div class="interval-select-wrapper">
+                            <input type="number" id="input-interval" class="form-control" min="0" step="any" placeholder="默认 10S" value="10">
+                            <div class="interval-presets">
+                                <button type="button" class="btn-preset" data-val="1">1S (原始)</button>
+                                <button type="button" class="btn-preset" data-val="5">5S</button>
+                                <button type="button" class="btn-preset active" data-val="10">10S</button>
+                                <button type="button" class="btn-preset" data-val="60">1Min</button>
+                                <button type="button" class="btn-preset" data-val="300">5Min</button>
+                                <button type="button" class="btn-preset" data-val="0">全量导出</button>
+                            </div>
+                        </div>
+                        <span class="input-help" id="interval-help-text">默认 10.0 秒。0 表示保留全部原始采样点。如果没有时间列，此处数值表示每 N 行抽取 1 行（例如 10 表示每 10 行提取 1 行数据）。</span>
+                    </div>
+                </div>
+
+                <!-- 选项卡 3: 导出命名 -->
+                <div class="tab-pane" id="tab-output">
+                    <div class="form-group">
+                        <label for="input-custom-name">导出 Excel 文件名</label>
+                        <input type="text" id="input-custom-name" class="form-control" placeholder="请输入文件名">
+                        <span class="input-help">只包含文件名即可，如 `sensor_a_data.xlsx`。默认后缀为 `.xlsx`。</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="modal-footer">
+                <button id="btn-modal-cancel" class="btn btn-secondary">取消</button>
+                <button id="btn-modal-save" class="btn btn-primary">保存配置</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 提示通知组件 -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

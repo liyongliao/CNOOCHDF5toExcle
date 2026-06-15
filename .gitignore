@@ -1,0 +1,65 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+bin/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nosetests
+.jasmine/
+.node_modules/
+.pytest_cache/
+.coveragerc
+.coverage
+*.cover
+.hypothesis/
+
+# Virtual Environments
+venv/
+ENV/
+env/
+.env
+.venv
+poetry.lock
+pipfile
+pipfile.lock
+
+# macOS system files
+.DS_Store
+
+# Large production data and output files
+生产环境h5文件/
+exports/
+*.h5
+*.hdf5
+*.xlsx
+*.xls
+*.csv
