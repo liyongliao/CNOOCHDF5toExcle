@@ -963,3 +963,27 @@ body::before {
     border-color: var(--danger) !important;
     color: #fff !important;
 }
+
+/* 响应式媒体查询适配不同屏幕 */
+@media (max-width: 1200px) {
+    .app-container {
+        padding: 16px;
+        gap: 16px;
+    }
+    .app-content {
+        grid-template-columns: 1fr; /* 侧边栏和主面板堆叠显示 */
+        gap: 16px;
+    }
+}
+
+@media (max-width: 768px) {
+    .app-header {
+        flex-direction: column;
+        gap: 12px;
+        align-items: flex-start;
+    }
+    .header-actions {
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+}

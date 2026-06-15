@@ -18,6 +18,12 @@ document.addEventListener("DOMContentLoaded", () => {
     bindEvents();
 });
 
+// 平台无关的提取文件名辅助函数 (支持 / 和 \)
+function getFilename(path) {
+    if (!path) return "";
+    return path.split(/[/\\]/).pop();
+}
+
 // 初始化应用
 function initApp() {
     // 从 localStorage 恢复历史路径
@@ -37,16 +43,28 @@ function initApp() {
 
 // 绑定所有的事件监听器
 function bindEvents() {
-    // 扫描按钮
-    document.getElementById("btn-scan").addEventListener("click", () => {
-        const srcPath = document.getElementById("input-dir-path").value.trim();
-        if (!srcPath) {
-            showToast("请输入源文件夹路径或文件路径", "warning");
-            return;
-        }
-        localStorage.setItem("h5_src_path", srcPath);
-        scanDirectory(srcPath);
-    });
+    // 监听源路径框变化自动扫描 (失焦或改变时)
+    const srcInput = document.getElementById("input-dir-path");
+    if (srcInput) {
+        srcInput.addEventListener("change", () => {
+            const srcPath = srcInput.value.trim();
+            if (srcPath) {
+                localStorage.setItem("h5_src_path", srcPath);
+                scanDirectory(srcPath);
+            }
+        });
+
+        // 监听回车自动扫描
+        srcInput.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") {
+                const srcPath = srcInput.value.trim();
+                if (srcPath) {
+                    localStorage.setItem("h5_src_path", srcPath);
+                    scanDirectory(srcPath);
+                }
+            }
+        });
+    }
 
     // 监听输出目录输入框的保存
     document.getElementById("output-dir-path").addEventListener("input", (e) => {
@@ -119,7 +137,18 @@ function bindEvents() {
     const fieldSearchInput = document.getElementById("input-field-search");
     if (fieldSearchInput) {
         fieldSearchInput.addEventListener("input", (e) => {
-            const query = e.target.value.toLowerCase().trim();
+            let query = e.target.value.toLowerCase().trim();
+            
+            // 智能检索转译：方便用户进行常规性简称检索（海油 H5 特色匹配）
+            query = query.replace(/temperature/g, "temp");
+            query = query.replace(/pressure/g, "pres");
+            query = query.replace(/fic\s*1/g, "fic s1");
+            query = query.replace(/fic\s*2/g, "fic s2");
+            query = query.replace(/esp\s*1/g, "esp s1");
+            query = query.replace(/esp\s*2/g, "esp s2");
+            query = query.replace(/gauge\s*1/g, "gauge s1");
+            query = query.replace(/gauge\s*2/g, "gauge s2");
+            
             const items = state.currentFieldItems || [];
             for (let i = 0; i < items.length; i++) {
                 const item = items[i];
@@ -192,8 +221,10 @@ function formatBytes(bytes) {
 // 扫描文件夹
 async function scanDirectory(path) {
     const btn = document.getElementById("btn-scan");
-    btn.disabled = true;
-    btn.innerText = "扫描中...";
+    if (btn) {
+        btn.disabled = true;
+        btn.innerText = "扫描中...";
+    }
     
     try {
         const response = await fetch("/api/scan", {
@@ -216,8 +247,11 @@ async function scanDirectory(path) {
             let defaultOut = path;
             // 如果输入的是单个文件路径，获取其所在目录
             if (path.toLowerCase().endsWith(".h5") || path.toLowerCase().endsWith(".hdf5")) {
-                // 简单的截取目录
-                defaultOut = path.substring(0, path.lastIndexOf("/"));
+                // 简单的截取目录 (支持 Windows 与 macOS)
+                const idx = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+                if (idx !== -1) {
+                    defaultOut = path.substring(0, idx);
+                }
             }
             outputInput.value = defaultOut;
             localStorage.setItem("h5_out_path", defaultOut);
@@ -231,8 +265,10 @@ async function scanDirectory(path) {
     } catch (e) {
         showToast(e.message, "error");
     } finally {
-        btn.disabled = false;
-        btn.innerText = "扫描";
+        if (btn) {
+            btn.disabled = false;
+            btn.innerText = "扫描";
+        }
     }
 }
 
@@ -285,11 +321,12 @@ function renderFileList() {
                 ${configSummary}
             </td>
             <td>
-                <div style="display: flex; gap: 6px; align-items: center;">
-                    <select class="form-control row-preset-select" data-path="${file.path}" style="width: 140px; padding: 4px 6px; height: 28px; font-size: 11px; border-radius: 4px; display: inline-block; background-color: var(--bg-input); border: 1px solid var(--border-color); color: var(--text-main);">
-                        <option value="">-- 快速配置 --</option>
-                    </select>
-                    <button class="btn btn-secondary btn-small btn-config" data-path="${file.path}">配置</button>
+                <div style="display: flex; flex-direction: column; gap: 8px; align-items: flex-start;">
+                    <!-- 快速配置标签容器，如果多就横向滚动 -->
+                    <div class="row-preset-tags-container" data-path="${file.path}" style="display: flex; gap: 6px; overflow-x: auto; max-width: 260px; padding-bottom: 2px; white-space: nowrap; scrollbar-width: none;">
+                        <!-- 动态载入配置标签 -->
+                    </div>
+                    <button class="btn btn-secondary btn-small btn-config" data-path="${file.path}" style="width: 80px;">手动配置</button>
                 </div>
             </td>
         `;
@@ -305,31 +342,59 @@ function renderFileList() {
         tbody.appendChild(tr);
     });
 
-    // 填充并绑定每行文件自带的快速模板配置下拉框
-    const rowSelects = tbody.querySelectorAll(".row-preset-select");
+    // 填充并绑定每行文件自带的快速模板配置标签
+    const rowPresetContainers = tbody.querySelectorAll(".row-preset-tags-container");
     const presets = getPresets();
-    rowSelects.forEach(select => {
-        const filePath = select.getAttribute("data-path");
-        Object.keys(presets).forEach(name => {
-            const opt = document.createElement("option");
-            opt.value = name;
-            opt.innerText = name;
-            select.appendChild(opt);
-        });
+    
+    rowPresetContainers.forEach(container => {
+        const filePath = container.getAttribute("data-path");
+        container.innerHTML = "";
         
-        // 如果该文件已经被配置过，可将对应快速下拉框的值同步
-        // 注意：因为模板是只针对字段筛选，我们这里只在匹配时做辅助对齐
+        const presetNames = Object.keys(presets);
+        if (presetNames.length === 0) {
+            container.innerHTML = `<span style="font-size: 11px; color: var(--text-muted); line-height: 22px;">暂无常用配置</span>`;
+            return;
+        }
         
-        select.addEventListener("change", async (e) => {
-            const templateName = e.target.value;
-            if (!templateName) return;
+        presetNames.forEach(name => {
+            const badge = document.createElement("span");
+            badge.className = "preset-badge";
+            badge.innerText = name;
+            badge.style.cssText = `
+                display: inline-block;
+                padding: 3px 8px;
+                font-size: 11px;
+                border-radius: 12px;
+                background-color: rgba(255, 255, 255, 0.05);
+                border: 1px solid var(--border-color);
+                color: var(--text-muted);
+                cursor: pointer;
+                transition: var(--transition);
+                user-select: none;
+            `;
             
-            select.disabled = true;
-            await applyTemplateToFile(filePath, templateName);
-            select.disabled = false;
+            // Hover 效果
+            badge.addEventListener("mouseenter", () => {
+                badge.style.backgroundColor = "rgba(238, 127, 34, 0.15)";
+                badge.style.borderColor = "var(--orange-accent, #EE7F22)";
+                badge.style.color = "#fff";
+            });
+            badge.addEventListener("mouseleave", () => {
+                badge.style.backgroundColor = "rgba(255, 255, 255, 0.05)";
+                badge.style.borderColor = "var(--border-color)";
+                badge.style.color = "var(--text-muted)";
+            });
             
-            renderFileList(); // 刷新状态列展示
-            updateBatchPanelStats();
+            badge.addEventListener("click", async () => {
+                badge.style.opacity = "0.5";
+                await applyTemplateToFile(filePath, name);
+                badge.style.opacity = "1";
+                renderFileList(); // 刷新状态列展示
+                updateBatchPanelStats();
+                showToast(`已成功为该文件应用常用配置 "${name}"`, "success");
+            });
+            
+            container.appendChild(badge);
         });
     });
 }
@@ -383,7 +448,7 @@ function toggleAllFields(checked) {
 // 打开模态框，按需异步解析文件元数据
 async function openConfigModal(filePath) {
     state.currentConfigFilePath = filePath;
-    const filename = filePath.split("/").pop();
+    const filename = getFilename(filePath);
     document.getElementById("modal-filename").innerText = filename;
     
     // 初始化 Tab 显示为第一页
@@ -458,6 +523,14 @@ async function openConfigModal(filePath) {
         const searchInput = document.getElementById("input-field-search");
         if (searchInput) {
             searchInput.value = "";
+            // 绑定筛选事件
+            searchInput.oninput = (e) => {
+                const val = e.target.value.toLowerCase();
+                state.currentFieldItems.forEach(item => {
+                    const match = item.name.includes(val) || item.fullPath.includes(val);
+                    item.element.style.display = match ? "flex" : "none";
+                });
+            };
         }
         
         // 渲染时间与重采样页面
@@ -503,16 +576,16 @@ function renderFields(datasets, selectedFields) {
                 <span class="checkmark"></span>
             </label>
             <div class="field-details">
-                <span class="field-name" title="${ds.path}">${ds.path.split("/").pop()}</span>
+                <span class="field-name" title="${ds.path}">${getFilename(ds.path)}</span>
                 <span class="field-meta">大小: ${ds.size} 行 | 类型: ${ds.dtype}</span>
             </div>
         `;
         container.appendChild(div);
         
-        // 缓存 DOM 节点与预计算字段名，以实现 60fps 的极速模糊搜索过滤
+        // Cache DOM nodes and precomputed names for 60fps fuzzy filtering
         state.currentFieldItems.push({
             element: div,
-            name: ds.path.split("/").pop().toLowerCase(),
+            name: getFilename(ds.path).toLowerCase(),
             fullPath: ds.path.toLowerCase()
         });
     });
@@ -526,7 +599,7 @@ function renderTimeSettings(inspectData, config) {
     inspectData.datasets.forEach(ds => {
         const opt = document.createElement("option");
         opt.value = ds.path;
-        opt.innerText = ds.path.split("/").pop();
+        opt.innerText = getFilename(ds.path);
         timeDropdown.appendChild(opt);
     });
     
@@ -589,7 +662,7 @@ function handleTimeColChange(timeColPath, forceType = null) {
             const cache = state.fileConfigs[state.currentConfigFilePath];
             if (cache && cache.datasets) {
                 // 如果改变了时间列，重新做一次推导（实际上一般只有一列时间，这里做基础防护）
-                const name = timeColPath.split("/").pop().lower();
+                const name = getFilename(timeColPath).toLowerCase();
                 // 默认秒级
                 type = "timestamp_seconds";
                 if (name.includes("ms") || name.includes("millisecond")) {
@@ -721,7 +794,7 @@ async function startBatchExport() {
                 }
                 
                 const inspectData = await response.json();
-                const filename = path.split("/").pop();
+                const filename = getFilename(path);
                 
                  // 生成一键默认导出配置：导出除时间外的所有字段，默认 10S 采样，最大范围
                  config = {
@@ -799,7 +872,7 @@ function showProgressPanel(taskIds, configs) {
     
     configs.forEach((cfg, index) => {
         const taskId = taskIds[index];
-        const filename = cfg.filePath.split("/").pop();
+        const filename = getFilename(cfg.filePath);
         
         const item = document.createElement("div");
         item.className = "progress-item";
@@ -997,7 +1070,7 @@ async function applyTemplateToFile(filePath, templateName) {
     
     let config = state.fileConfigs[filePath];
     let inspectData = null;
-    const filename = filePath.split("/").pop();
+    const filename = getFilename(filePath);
     
     try {
         if (config && config.isInspected) {
@@ -1023,7 +1096,7 @@ async function applyTemplateToFile(filePath, templateName) {
         const selectedFields = [];
         inspectData.datasets.forEach(ds => {
             const path = ds.path;
-            const baseName = path.split("/").pop();
+            const baseName = getFilename(path);
             // 完整路径或字段名存在于模板中
             if (templateFields.includes(path) || templateFields.includes(baseName)) {
                 selectedFields.push(path);
