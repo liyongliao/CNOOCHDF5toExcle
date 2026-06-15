@@ -3,6 +3,12 @@ import sys
 import os
 import shutil
 
+# 强制标准输出与标准错误使用 UTF-8 编码，防止 Windows 虚拟机控制台 cp1252 编码报错
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
+
 def build_executable():
     print("==================================================")
     print(" 正在开始打包 HDF5 to Excel 可视化可执行程序")
