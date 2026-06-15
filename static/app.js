@@ -32,13 +32,15 @@ function initApp() {
     
     if (savedSrcPath) {
         document.getElementById("input-dir-path").value = savedSrcPath;
+        // 页面初始化时也自动扫描已保存的路径
+        scanDirectory(savedSrcPath);
     }
     if (savedOutPath) {
         document.getElementById("output-dir-path").value = savedOutPath;
     }
     
-    // 初始化批量应用下拉菜单
-    loadBatchPresetsDropdown();
+    // 初始化批量应用配置标签
+    loadBatchPresetsTags();
 }
 
 // 绑定所有的事件监听器
@@ -130,8 +132,21 @@ function bindEvents() {
     document.getElementById("btn-save-preset").addEventListener("click", saveCurrentAsPreset);
     document.getElementById("btn-delete-preset").addEventListener("click", deleteSelectedPreset);
 
-    // 批量应用常用配置按钮事件
-    document.getElementById("btn-apply-preset-batch").addEventListener("click", batchApplyTemplate);
+    // 绑定列表旁边的扫描/刷新按钮事件
+    const scanRefreshBtn = document.getElementById("btn-scan-refresh");
+    if (scanRefreshBtn) {
+        scanRefreshBtn.addEventListener("click", () => {
+            const srcInput = document.getElementById("input-dir-path");
+            if (srcInput) {
+                const srcPath = srcInput.value.trim();
+                if (srcPath) {
+                    scanDirectory(srcPath);
+                } else {
+                    showToast("请先在左侧输入源 H5 文件夹或文件路径！", "warning");
+                }
+            }
+        });
+    }
 
     // 字段筛选模糊搜索过滤事件
     const fieldSearchInput = document.getElementById("input-field-search");
@@ -220,10 +235,10 @@ function formatBytes(bytes) {
 
 // 扫描文件夹
 async function scanDirectory(path) {
-    const btn = document.getElementById("btn-scan");
+    const btn = document.getElementById("btn-scan-refresh") || document.getElementById("btn-scan");
     if (btn) {
         btn.disabled = true;
-        btn.innerText = "扫描中...";
+        btn.innerText = "🔄 扫描中...";
     }
     
     try {
@@ -259,7 +274,7 @@ async function scanDirectory(path) {
         
         renderFileList();
         updateBatchPanelStats();
-        loadBatchPresetsDropdown(); // 重新加载批量下拉框状态
+        loadBatchPresetsTags(); // 重新加载批量应用配置标签
         showToast(`成功扫描到 ${state.files.length} 个 H5 文件`, "success");
         
     } catch (e) {
@@ -267,7 +282,7 @@ async function scanDirectory(path) {
     } finally {
         if (btn) {
             btn.disabled = false;
-            btn.innerText = "扫描";
+            btn.innerText = "🔄 扫描/刷新";
         }
     }
 }
@@ -999,6 +1014,8 @@ async function selectDirectory(targetInputId, storageKey) {
                     outInput.value = data.path;
                     localStorage.setItem("h5_out_path", data.path);
                 }
+                // 浏览目录后自动扫描
+                scanDirectory(data.path);
             }
         }
     } catch (e) {
@@ -1034,32 +1051,102 @@ function loadTemplates() {
     
     deleteBtn.style.display = "none";
     
-    // 同时更新主界面的批量下拉框
-    loadBatchPresetsDropdown();
+    // 同时更新主界面的批量标签
+    loadBatchPresetsTags();
 }
 
-// 载入并渲染一级界面的全局批量应用常用配置下拉菜单
-function loadBatchPresetsDropdown() {
-    const select = document.getElementById("select-preset-batch");
-    const btn = document.getElementById("btn-apply-preset-batch");
+// 载入并渲染一级界面的全局批量应用常用配置标签
+function loadBatchPresetsTags() {
+    const container = document.getElementById("batch-preset-tags-container");
+    if (!container) return;
     
-    if (!select || !btn) return;
-    
-    select.innerHTML = '<option value="">-- 批量应用常用配置 --</option>';
-    btn.disabled = true;
+    container.innerHTML = "";
     
     const presets = getPresets();
-    Object.keys(presets).forEach(name => {
-        const opt = document.createElement("option");
-        opt.value = name;
-        opt.innerText = name;
-        select.appendChild(opt);
-    });
+    const presetNames = Object.keys(presets);
     
-    // 监听下拉改变来启用应用按钮
-    select.onchange = (e) => {
-        btn.disabled = !e.target.value;
-    };
+    if (presetNames.length === 0) {
+        container.innerHTML = '<span style="color: var(--text-muted); font-size: 11px;">(暂无常用配置)</span>';
+        return;
+    }
+    
+    // 添加说明标签
+    const label = document.createElement("span");
+    label.style.fontSize = "11px";
+    label.style.color = "var(--text-muted)";
+    label.style.marginRight = "6px";
+    label.innerText = "批量应用:";
+    container.appendChild(label);
+    
+    presetNames.forEach(name => {
+        const badge = document.createElement("span");
+        badge.className = "preset-badge";
+        badge.innerText = name;
+        
+        // 样式适配 CNOOC 风格，和行内样式统一
+        badge.style.cssText = `
+            display: inline-block;
+            padding: 3px 8px;
+            font-size: 11px;
+            border-radius: 12px;
+            background-color: rgba(0, 122, 255, 0.1);
+            border: 1px solid rgba(0, 122, 255, 0.25);
+            color: var(--primary, #007aff);
+            cursor: pointer;
+            transition: var(--transition, all 0.2s ease);
+            user-select: none;
+            font-weight: 500;
+        `;
+        
+        // Hover 效果
+        badge.addEventListener("mouseenter", () => {
+            badge.style.backgroundColor = "rgba(238, 127, 34, 0.15)";
+            badge.style.borderColor = "var(--orange-accent, #EE7F22)";
+            badge.style.color = "#fff";
+            badge.style.transform = "translateY(-1px)";
+        });
+        badge.addEventListener("mouseleave", () => {
+            badge.style.backgroundColor = "rgba(0, 122, 255, 0.1)";
+            badge.style.borderColor = "rgba(0, 122, 255, 0.25)";
+            badge.style.color = "var(--primary, #007aff)";
+            badge.style.transform = "none";
+        });
+        
+        // 点击批量应用该配置模板
+        badge.addEventListener("click", async () => {
+            const checkboxes = document.querySelectorAll(".file-select-checkbox:checked");
+            const selectedPaths = Array.from(checkboxes).map(cb => cb.getAttribute("data-path"));
+            
+            if (selectedPaths.length === 0) {
+                showToast("请先在列表左侧勾选您需要应用模板的 H5 文件！", "warning");
+                return;
+            }
+            
+            // 提示用户正在应用
+            showToast(`正在批量应用常用配置 "${name}"...`, "info");
+            
+            // 禁用所有标签，避免重复点击
+            const badges = container.querySelectorAll(".preset-badge");
+            badges.forEach(b => { b.style.pointerEvents = "none"; b.style.opacity = "0.5"; });
+            
+            let successCount = 0;
+            for (let path of selectedPaths) {
+                await applyTemplateToFile(path, name);
+                successCount++;
+            }
+            
+            // 重新启用标签
+            badges.forEach(b => { b.style.pointerEvents = "auto"; b.style.opacity = "1"; });
+            
+            // 刷新文件列表显示状态
+            renderFileList();
+            updateBatchPanelStats();
+            
+            showToast(`成功将配置 "${name}" 批量应用至 ${successCount} 个文件`, "success");
+        });
+        
+        container.appendChild(badge);
+    });
 }
 
 // 针对单个 H5 文件静默应用模板配置并缓存其字段勾选状态
@@ -1133,39 +1220,7 @@ async function applyTemplateToFile(filePath, templateName) {
     }
 }
 
-// 批量将模板应用给所有已勾选的文件
-async function batchApplyTemplate() {
-    const select = document.getElementById("select-preset-batch");
-    const templateName = select.value;
-    if (!templateName) return;
-    
-    const checkboxes = document.querySelectorAll(".file-select-checkbox:checked");
-    const selectedPaths = Array.from(checkboxes).map(cb => cb.getAttribute("data-path"));
-    
-    if (selectedPaths.length === 0) {
-        showToast("请先在列表左侧勾选您需要应用模板的 H5 文件！", "warning");
-        return;
-    }
-    
-    const btn = document.getElementById("btn-apply-preset-batch");
-    btn.disabled = true;
-    const oldText = btn.innerText;
-    btn.innerText = "应用中...";
-    
-    let successCount = 0;
-    for (let path of selectedPaths) {
-        await applyTemplateToFile(path, templateName);
-        successCount++;
-    }
-    
-    btn.innerText = oldText;
-    select.value = "";
-    btn.disabled = true;
-    
-    renderFileList();
-    updateBatchPanelStats();
-    showToast(`批量配置完成：已将模板 "${templateName}" 成功刷入 ${successCount} 个文件！`, "success");
-}
+// 批量将模板应用给所有已勾选的文件 (已废弃，直接由标签点击事件处理)
 
 // 应用选中的配置模板
 function applyPresetTemplate(name) {

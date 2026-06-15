@@ -71,12 +71,9 @@
                 <!-- 文件列表 -->
                 <div class="file-list-card card">
                     <div class="card-header">
-                        <h2>📊 待处理 H5 文件列表</h2>
+                        <h2>📊 待处理 H5 文件列表 <button id="btn-scan-refresh" class="btn btn-secondary btn-small" style="margin-left: 10px; font-size: 11px; padding: 3px 8px; vertical-align: middle;">🔄 扫描/刷新</button></h2>
                         <div class="header-actions" style="display: flex; align-items: center; gap: 8px;">
-                            <select id="select-preset-batch" class="form-control" style="width: 170px; padding: 4px 8px; height: 30px; font-size: 12px; border-radius: 4px; display: inline-block; background-color: var(--bg-input); border: 1px solid var(--border-color); color: var(--text-main);">
-                                <option value="">-- 批量应用常用配置 --</option>
-                            </select>
-                            <button id="btn-apply-preset-batch" class="btn btn-secondary btn-small" disabled>应用</button>
+                            <div id="batch-preset-tags-container" style="display: flex; gap: 6px; align-items: center; margin-right: 12px; overflow-x: auto; max-width: 420px; white-space: nowrap; scrollbar-width: none;"></div>
                             <button id="btn-select-all" class="btn btn-secondary btn-small">全选</button>
                             <button id="btn-select-none" class="btn btn-secondary btn-small">清空选择</button>
                         </div>
