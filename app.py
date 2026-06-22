@@ -538,12 +538,6 @@ def export_task_worker(task_id: str, cfg: ExportConfig, output_dir: str):
                         
                 _, _, convert_func = determine_field_type_and_unit(f, field, cfg.tempUnit, cfg.presUnit)
                 v_final = convert_func(v_aligned)
-                try:
-                    if np.issubdtype(v_final.dtype, np.floating):
-                        # 必须先转换为 float64 类型再进行 np.round，否则原本 float32 的尾数噪声会在保存为 Excel 时被 openpyxl 还原出冗长的小数位数
-                        v_final = np.round(v_final.astype(np.float64), 2)
-                except Exception:
-                    pass
                 data_dict[col_title] = v_final
                 
             update_status(85, "正在整理对齐后的数据表...")
@@ -557,7 +551,7 @@ def export_task_worker(task_id: str, cfg: ExportConfig, output_dir: str):
                 update_status(90, f"正在将单表数据写入 CSV 文件: {os.path.basename(output_path)}...")
                 with open(output_path, "w", encoding="utf-8") as csv_file:
                     csv_file.write(meta_line + "\n")
-                    df.to_csv(csv_file, index=False)
+                    df.to_csv(csv_file, index=False, float_format="%.2f")
             else:
                 update_status(90, f"正在将单表数据写入 Excel 文件: {os.path.basename(output_path)}...")
                 save_to_excel_with_meta(df, output_path, meta_line)
