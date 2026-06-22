@@ -24,6 +24,28 @@ function getFilename(path) {
     return path.split(/[/\\]/).pop();
 }
 
+// 生成默认 Excel 导出文件名 (去除 Instruct_序列号- 前缀并替换后缀为 .xlsx)
+function generateDefaultExcelName(filename) {
+    let base = filename;
+    const dotIndex = filename.lastIndexOf(".");
+    if (dotIndex !== -1) {
+        base = filename.substring(0, dotIndex);
+    }
+    
+    // 匹配 "Instruct_序列号-" 前缀并移除之
+    const match = base.match(/^Instruct_\d+-(.+)$/i);
+    if (match && match[1]) {
+        return match[1] + ".xlsx";
+    }
+    
+    const match2 = base.match(/^Instruct_[^-]*-(.+)$/i);
+    if (match2 && match2[1]) {
+        return match2[1] + ".xlsx";
+    }
+    
+    return base + ".xlsx";
+}
+
 // 初始化应用
 function initApp() {
     // 从 localStorage 恢复历史路径
@@ -521,7 +543,7 @@ async function openConfigModal(filePath) {
                 endTimeStr: inspectData.timeMaxStr,
                 baseDate: "1970-01-01 00:00:00",
                 interval: 10.0, // 默认重采样间隔 10S
-                customName: filename.substring(0, filename.lastIndexOf(".")) + "_export.xlsx",
+                customName: generateDefaultExcelName(filename),
                 tempUnit: "degC",
                 presUnit: "PSI"
             };
@@ -821,7 +843,7 @@ async function startBatchExport() {
                      endTimeStr: inspectData.timeMaxStr,
                      baseDate: "1970-01-01 00:00:00",
                      interval: 10.0,
-                     customName: filename.substring(0, filename.lastIndexOf(".")) + "_export.xlsx",
+                     customName: generateDefaultExcelName(filename),
                      tempUnit: "degC",
                      presUnit: "PSI"
                  };
@@ -1154,8 +1176,32 @@ function loadBatchPresetsTags() {
 // 针对单个 H5 文件静默应用模板配置并缓存其字段勾选状态
 async function applyTemplateToFile(filePath, templateName) {
     const presets = getPresets();
-    const templateFields = presets[templateName];
-    if (!templateFields) return;
+    const preset = presets[templateName];
+    if (!preset) return;
+    
+    let templateFields = [];
+    let presetInterval = 10.0;
+    let presetTempUnit = "degC";
+    let presetPresUnit = "PSI";
+    let presetBaseDate = "1970-01-01 00:00:00";
+    let presetStartTime = null;
+    let presetEndTime = null;
+    let presetTimeField = null;
+    let presetTimeType = null;
+    
+    if (Array.isArray(preset)) {
+        templateFields = preset;
+    } else {
+        templateFields = preset.fields || [];
+        presetInterval = preset.interval !== undefined ? preset.interval : 10.0;
+        presetTempUnit = preset.tempUnit || "degC";
+        presetPresUnit = preset.presUnit || "PSI";
+        presetBaseDate = preset.baseDate || "1970-01-01 00:00:00";
+        presetStartTime = preset.startTimeStr || null;
+        presetEndTime = preset.endTimeStr || null;
+        presetTimeField = preset.timeField || null;
+        presetTimeType = preset.timeType || null;
+    }
     
     let config = state.fileConfigs[filePath];
     let inspectData = null;
@@ -1207,13 +1253,15 @@ async function applyTemplateToFile(filePath, templateName) {
             originalMaxTime: inspectData.timeMaxStr,
             // 用户设置值
             selectedFields: selectedFields,
-            timeField: inspectData.detectedTimeField,
-            timeTypeSelected: inspectData.timeType,
-            startTimeStr: inspectData.timeMinStr,
-            endTimeStr: inspectData.timeMaxStr,
-            baseDate: "1970-01-01 00:00:00",
-            interval: 10.0, // 默认 10S
-            customName: filename.substring(0, filename.lastIndexOf(".")) + "_export.xlsx"
+            timeField: presetTimeField !== null ? presetTimeField : inspectData.detectedTimeField,
+            timeTypeSelected: presetTimeType !== null ? presetTimeType : inspectData.timeType,
+            startTimeStr: presetStartTime !== null ? presetStartTime : (inspectData.timeMinStr || ""),
+            endTimeStr: presetEndTime !== null ? presetEndTime : (inspectData.timeMaxStr || ""),
+            baseDate: presetBaseDate,
+            interval: presetInterval,
+            tempUnit: presetTempUnit,
+            presUnit: presetPresUnit,
+            customName: generateDefaultExcelName(filename)
         };
         
         showToast(`已为 "${filename}" 应用配置模板: ${templateName}`, "success");
@@ -1232,11 +1280,42 @@ function applyPresetTemplate(name) {
     }
     
     const presets = getPresets();
-    const templateFields = presets[name];
-    if (!templateFields) return;
+    const preset = presets[name];
+    if (!preset) return;
     
     // 显示删除按钮
     document.getElementById("btn-delete-preset").style.display = "inline-flex";
+    
+    let templateFields = [];
+    if (Array.isArray(preset)) {
+        templateFields = preset;
+    } else {
+        templateFields = preset.fields || [];
+        
+        // 载入时间与重采样设置
+        if (preset.timeField !== undefined) document.getElementById("select-time-col").value = preset.timeField;
+        if (preset.timeType !== undefined) document.getElementById("select-time-type").value = preset.timeType;
+        if (preset.startTimeStr !== undefined) document.getElementById("input-start-time").value = preset.startTimeStr;
+        if (preset.endTimeStr !== undefined) document.getElementById("input-end-time").value = preset.endTimeStr;
+        if (preset.baseDate !== undefined) document.getElementById("input-base-date").value = preset.baseDate;
+        
+        if (preset.interval !== undefined) {
+            document.getElementById("input-interval").value = preset.interval;
+            // 更新间隔快捷按钮激活样式
+            const intervalBtns = document.querySelectorAll(".btn-preset");
+            intervalBtns.forEach(btn => {
+                const val = parseFloat(btn.getAttribute("data-val"));
+                if (val === preset.interval) {
+                    btn.classList.add("active");
+                } else {
+                    btn.classList.remove("active");
+                }
+            });
+        }
+        
+        if (preset.tempUnit !== undefined) document.getElementById("select-temp-unit").value = preset.tempUnit;
+        if (preset.presUnit !== undefined) document.getElementById("select-pres-unit").value = preset.presUnit;
+    }
     
     const checkboxes = document.querySelectorAll(".field-checkbox");
     let count = 0;
@@ -1254,7 +1333,7 @@ function applyPresetTemplate(name) {
         }
     });
     
-    showToast(`成功应用配置 "${name}"，自动匹配勾选了 ${count} 个字段。`, "success");
+    showToast(`成功应用配置 "${name}"，自动匹配勾选了 ${count} 个字段，并已加载对应的时间与采样间隔设置。`, "success");
 }
 
 // 保存当前所勾选的字段为新模板
@@ -1277,15 +1356,27 @@ function saveCurrentAsPreset() {
     // 存储字段的叶子节点名称 (baseName)，这样能自适应不同 schema 命名的 H5 文件
     const fieldNames = Array.from(checkedBoxes).map(cb => cb.value.split("/").pop());
     
+    const presetObj = {
+        fields: fieldNames,
+        timeField: document.getElementById("select-time-col").value,
+        timeType: document.getElementById("select-time-type").value,
+        startTimeStr: document.getElementById("input-start-time").value,
+        endTimeStr: document.getElementById("input-end-time").value,
+        baseDate: document.getElementById("input-base-date").value,
+        interval: parseFloat(document.getElementById("input-interval").value) || 10.0,
+        tempUnit: document.getElementById("select-temp-unit").value,
+        presUnit: document.getElementById("select-pres-unit").value
+    };
+    
     const presets = getPresets();
-    presets[cleanName] = fieldNames;
+    presets[cleanName] = presetObj;
     savePresets(presets);
     
     loadTemplates();
     document.getElementById("select-preset-template").value = cleanName;
     document.getElementById("btn-delete-preset").style.display = "inline-flex";
     
-    showToast(`配置模板 "${cleanName}" 已保存！`, "success");
+    showToast(`配置模板 "${cleanName}" 已保存，包含字段筛选与时间/采样设置！`, "success");
 }
 
 // 删除当前选中的模板

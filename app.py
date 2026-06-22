@@ -526,6 +526,11 @@ def export_task_worker(task_id: str, cfg: ExportConfig, output_dir: str):
                         
                 _, _, convert_func = determine_field_type_and_unit(f, field, cfg.tempUnit, cfg.presUnit)
                 v_final = convert_func(v_aligned)
+                try:
+                    if np.issubdtype(v_final.dtype, np.floating):
+                        v_final = np.round(v_final, 2)
+                except Exception:
+                    pass
                 data_dict[col_title] = v_final
                 
             update_status(85, "正在整理对齐后的数据表...")
