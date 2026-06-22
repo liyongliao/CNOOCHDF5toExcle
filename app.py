@@ -247,6 +247,18 @@ def save_to_excel_with_meta(df: pd.DataFrame, output_path: str, meta_line: str):
                 
             if "Sheet" in writer.book.sheetnames:
                 writer.book.remove(writer.book["Sheet"])
+                
+        # 强制格式化所有数据列（除了第一列 Date time），保留 2 位小数，如 1.10 的 0 不被省略
+        for ws in writer.book.worksheets:
+            for col_idx in range(2, ws.max_column + 1):
+                for row_idx in range(3, ws.max_row + 1):
+                    cell = ws.cell(row=row_idx, column=col_idx)
+                    if cell.value is not None:
+                        try:
+                            float(cell.value)
+                            cell.number_format = "0.00"
+                        except (ValueError, TypeError):
+                            pass
 
 def read_field_array(f, field: str) -> np.ndarray:
     """读取 H5 字段数据，支持复合字段（冒号分隔）、未展开复合字段的数据部分提取"""
@@ -528,7 +540,8 @@ def export_task_worker(task_id: str, cfg: ExportConfig, output_dir: str):
                 v_final = convert_func(v_aligned)
                 try:
                     if np.issubdtype(v_final.dtype, np.floating):
-                        v_final = np.round(v_final, 2)
+                        # 必须先转换为 float64 类型再进行 np.round，否则原本 float32 的尾数噪声会在保存为 Excel 时被 openpyxl 还原出冗长的小数位数
+                        v_final = np.round(v_final.astype(np.float64), 2)
                 except Exception:
                     pass
                 data_dict[col_title] = v_final
@@ -600,25 +613,37 @@ def browse_directory():
     error_msg = ""
     
     if sys.platform == "darwin":
-        # macOS 优先使用 AppleScript (osascript)
-        cmd = "osascript -e 'POSIX path of (choose folder with prompt \"请选择文件夹:\")'"
+        # macOS 优先使用 AppleScript (osascript)，不使用 shell=True 以避免加载环境变量导致的慢启动
+        cmd = ["osascript", "-e", 'POSIX path of (choose folder with prompt "请选择文件夹:")']
         try:
-            output = subprocess.check_output(cmd, shell=True).decode('utf-8').strip()
+            output = subprocess.check_output(cmd, stderr=subprocess.STDOUT).decode('utf-8').strip()
             if output:
                 path = output
         except Exception as e_osa:
-            # osascript 失败时尝试 tkinter 兜底
+            err_out = ""
+            is_cancel = False
+            if isinstance(e_osa, subprocess.CalledProcessError):
+                err_out = e_osa.output.decode('utf-8', errors='ignore') if e_osa.output else ""
+                if "-128" in err_out or "canceled" in err_out.lower() or "取消" in err_out:
+                    is_cancel = True
+            
+            if is_cancel:
+                # 用户主动取消，干净返回，不显示报错弹窗
+                return {"path": ""}
+                
+            # osascript 真实报错或非 Cancel 时，尝试 tkinter 兜底
             try:
                 import tkinter as tk
                 from tkinter import filedialog
                 root = tk.Tk()
                 root.withdraw()
+                root.attributes('-topmost', True)
                 selected = filedialog.askdirectory()
                 root.destroy()
                 if selected:
                     path = os.path.abspath(selected)
             except Exception as e_tk:
-                error_msg = f"osascript 错误: {str(e_osa)}; Tkinter 错误: {str(e_tk)}"
+                error_msg = f"osascript 错误: {err_out if err_out else str(e_osa)}; Tkinter 错误: {str(e_tk)}"
     elif sys.platform == "win32":
         # Windows 优先使用 win32 ctypes 接口，实现毫秒级瞬时弹窗 (不依赖任何外部 GUI/Shell 进程)
         try:
