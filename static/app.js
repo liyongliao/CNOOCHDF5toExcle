@@ -1017,6 +1017,8 @@ async function selectDirectory(targetInputId, storageKey) {
                 // 浏览目录后自动扫描
                 scanDirectory(data.path);
             }
+        } else if (data.error) {
+            showToast(`调起系统文件夹选择器失败: ${data.error}`, "error");
         }
     } catch (e) {
         showToast("无法打开本地文件夹选择器，请手动输入路径。", "warning");

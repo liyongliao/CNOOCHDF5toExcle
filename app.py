@@ -592,15 +592,30 @@ def browse_directory():
     import subprocess
     
     path = ""
+    error_msg = ""
+    
     if sys.platform == "darwin":
+        # macOS 优先使用 AppleScript (osascript)
         cmd = "osascript -e 'POSIX path of (choose folder with prompt \"请选择文件夹:\")'"
         try:
             output = subprocess.check_output(cmd, shell=True).decode('utf-8').strip()
             if output:
                 path = output
-        except Exception:
-            pass
+        except Exception as e_osa:
+            # osascript 失败时尝试 tkinter 兜底
+            try:
+                import tkinter as tk
+                from tkinter import filedialog
+                root = tk.Tk()
+                root.withdraw()
+                selected = filedialog.askdirectory()
+                root.destroy()
+                if selected:
+                    path = os.path.abspath(selected)
+            except Exception as e_tk:
+                error_msg = f"osascript 错误: {str(e_osa)}; Tkinter 错误: {str(e_tk)}"
     elif sys.platform == "win32":
+        # Windows 优先使用 tkinter
         try:
             import tkinter as tk
             from tkinter import filedialog
@@ -611,9 +626,17 @@ def browse_directory():
             root.destroy()
             if selected:
                 path = os.path.abspath(selected)
-        except Exception:
-            pass
+        except Exception as e_tk:
+            # tkinter 失败时使用 PowerShell 脚本调用 Windows 原生 FolderBrowserDialog 兜底 (不依赖 tkinter 模块)
+            try:
+                cmd = 'powershell -NoProfile -Command "Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.FolderBrowserDialog; if ($f.ShowDialog() -eq \'OK\') { $f.SelectedPath }"'
+                output = subprocess.check_output(cmd, shell=True).decode('gbk', errors='ignore').strip()
+                if output:
+                    path = output
+            except Exception as e_ps:
+                error_msg = f"Tkinter 错误: {str(e_tk)}; PowerShell 错误: {str(e_ps)}"
     else:
+        # 其他系统使用 tkinter
         try:
             import tkinter as tk
             from tkinter import filedialog
@@ -624,11 +647,14 @@ def browse_directory():
             root.destroy()
             if selected:
                 path = os.path.abspath(selected)
-        except Exception:
-            pass
+        except Exception as e:
+            error_msg = str(e)
             
     if path:
         return {"path": path}
+    if error_msg:
+        print(f"打开文件夹选择器失败: {error_msg}")
+        return {"path": "", "error": error_msg}
     return {"path": ""}
 
 @app.post("/api/inspect")
