@@ -620,26 +620,59 @@ def browse_directory():
             except Exception as e_tk:
                 error_msg = f"osascript 错误: {str(e_osa)}; Tkinter 错误: {str(e_tk)}"
     elif sys.platform == "win32":
-        # Windows 优先使用 tkinter
+        # Windows 优先使用 win32 ctypes 接口，实现毫秒级瞬时弹窗 (不依赖任何外部 GUI/Shell 进程)
         try:
-            import tkinter as tk
-            from tkinter import filedialog
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes('-topmost', True)
-            selected = filedialog.askdirectory()
-            root.destroy()
-            if selected:
-                path = os.path.abspath(selected)
-        except Exception as e_tk:
-            # tkinter 失败时使用 PowerShell 脚本调用 Windows 原生 FolderBrowserDialog 兜底 (不依赖 tkinter 模块)
+            import ctypes
+            
+            class BROWSEINFO(ctypes.Structure):
+                _fields_ = [
+                    ("hwndOwner", ctypes.c_void_p),
+                    ("pidlRoot", ctypes.c_void_p),
+                    ("pszDisplayName", ctypes.c_wchar_p),
+                    ("lpszTitle", ctypes.c_wchar_p),
+                    ("ulFlags", ctypes.c_uint),
+                    ("lpfn", ctypes.c_void_p),
+                    ("lParam", ctypes.c_void_p),
+                    ("iImage", ctypes.c_int)
+                ]
+            
+            bi = BROWSEINFO()
+            bi.hwndOwner = None
+            bi.pidlRoot = None
+            bi.pszDisplayName = None
+            bi.lpszTitle = "请选择文件夹:"
+            bi.ulFlags = 0x0001 | 0x0040  # BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE
+            bi.lpfn = None
+            bi.lParam = None
+            bi.iImage = 0
+            
+            pidl = ctypes.windll.shell32.SHBrowseForFolderW(ctypes.byref(bi))
+            if pidl:
+                path_buf = ctypes.create_unicode_buffer(260)
+                if ctypes.windll.shell32.SHGetPathFromIDListW(pidl, path_buf):
+                    path = path_buf.value
+                ctypes.windll.ole32.CoTaskMemFree(pidl)
+        except Exception as e_c:
+            # win32 API 异常时，以 tkinter 动作做第一级备份
             try:
-                cmd = 'powershell -NoProfile -Command "Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.FolderBrowserDialog; if ($f.ShowDialog() -eq \'OK\') { $f.SelectedPath }"'
-                output = subprocess.check_output(cmd, shell=True).decode('gbk', errors='ignore').strip()
-                if output:
-                    path = output
-            except Exception as e_ps:
-                error_msg = f"Tkinter 错误: {str(e_tk)}; PowerShell 错误: {str(e_ps)}"
+                import tkinter as tk
+                from tkinter import filedialog
+                root = tk.Tk()
+                root.withdraw()
+                root.attributes('-topmost', True)
+                selected = filedialog.askdirectory()
+                root.destroy()
+                if selected:
+                    path = os.path.abspath(selected)
+            except Exception as e_tk:
+                # 依然失败时使用 PowerShell 脚本做终极兜底
+                try:
+                    cmd = 'powershell -NoProfile -Command "Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.FolderBrowserDialog; if ($f.ShowDialog() -eq \'OK\') { $f.SelectedPath }"'
+                    output = subprocess.check_output(cmd, shell=True).decode('gbk', errors='ignore').strip()
+                    if output:
+                        path = output
+                except Exception as e_ps:
+                    error_msg = f"Ctypes 错误: {str(e_c)}; Tkinter 错误: {str(e_tk)}; PowerShell 错误: {str(e_ps)}"
     else:
         # 其他系统使用 tkinter
         try:
