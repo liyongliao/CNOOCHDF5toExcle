@@ -288,6 +288,18 @@ body::before {
     box-shadow: 0 6px 20px rgba(0, 230, 118, 0.3);
 }
 
+.btn-csv {
+    background: linear-gradient(135deg, #10b981, #059669);
+    color: #fff;
+    box-shadow: 0 4px 15px rgba(16, 185, 129, 0.2);
+}
+
+.btn-csv:hover:not(:disabled) {
+    background: linear-gradient(135deg, #34d399, #10b981);
+    box-shadow: 0 6px 20px rgba(16, 185, 129, 0.3);
+}
+
+
 .btn-secondary {
     background-color: rgba(255, 255, 255, 0.08);
     color: var(--text-main);

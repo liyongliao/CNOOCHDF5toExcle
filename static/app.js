@@ -46,19 +46,49 @@ function generateDefaultExcelName(filename) {
     return base + ".xlsx";
 }
 
-// 初始化应用
-function initApp() {
-    // 从 localStorage 恢复历史路径
-    const savedSrcPath = localStorage.getItem("h5_src_path");
-    const savedOutPath = localStorage.getItem("h5_out_path");
-    
-    if (savedSrcPath) {
-        document.getElementById("input-dir-path").value = savedSrcPath;
-        // 页面初始化时也自动扫描已保存的路径
-        scanDirectory(savedSrcPath);
+// 保存设置到后端本地配置 config.json
+async function saveConfigToBackend(key, value) {
+    try {
+        const payload = {};
+        payload[key] = value;
+        await fetch("/api/config", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+    } catch (e) {
+        console.error("保存配置到后端失败:", e);
     }
-    if (savedOutPath) {
-        document.getElementById("output-dir-path").value = savedOutPath;
+}
+
+// 初始化应用
+async function initApp() {
+    let srcPath = "";
+    let outPath = "";
+    try {
+        const response = await fetch("/api/config");
+        if (response.ok) {
+            const config = await response.json();
+            srcPath = config.h5_src_path || "";
+            outPath = config.h5_out_path || "";
+            if (config.h5_field_presets) {
+                localStorage.setItem("h5_field_presets", JSON.stringify(config.h5_field_presets));
+            }
+        }
+    } catch (e) {
+        console.error("从后端载入本地配置失败，降级使用浏览器 localStorage:", e);
+        srcPath = localStorage.getItem("h5_src_path") || "";
+        outPath = localStorage.getItem("h5_out_path") || "";
+    }
+    
+    if (srcPath) {
+        document.getElementById("input-dir-path").value = srcPath;
+        localStorage.setItem("h5_src_path", srcPath);
+        scanDirectory(srcPath);
+    }
+    if (outPath) {
+        document.getElementById("output-dir-path").value = outPath;
+        localStorage.setItem("h5_out_path", outPath);
     }
     
     // 初始化批量应用配置标签
@@ -74,6 +104,7 @@ function bindEvents() {
             const srcPath = srcInput.value.trim();
             if (srcPath) {
                 localStorage.setItem("h5_src_path", srcPath);
+                saveConfigToBackend("h5_src_path", srcPath);
                 scanDirectory(srcPath);
             }
         });
@@ -84,6 +115,7 @@ function bindEvents() {
                 const srcPath = srcInput.value.trim();
                 if (srcPath) {
                     localStorage.setItem("h5_src_path", srcPath);
+                    saveConfigToBackend("h5_src_path", srcPath);
                     scanDirectory(srcPath);
                 }
             }
@@ -92,7 +124,9 @@ function bindEvents() {
 
     // 监听输出目录输入框的保存
     document.getElementById("output-dir-path").addEventListener("input", (e) => {
-        localStorage.setItem("h5_out_path", e.target.value.trim());
+        const outPath = e.target.value.trim();
+        localStorage.setItem("h5_out_path", outPath);
+        saveConfigToBackend("h5_out_path", outPath);
     });
 
     // 文件列表全选/清空
@@ -100,7 +134,11 @@ function bindEvents() {
     document.getElementById("btn-select-none").addEventListener("click", () => toggleAllFiles(false));
 
     // 批量导出按钮
-    document.getElementById("btn-start-batch").addEventListener("click", startBatchExport);
+    document.getElementById("btn-start-batch").addEventListener("click", () => startBatchExport("xlsx"));
+    const csvBtn = document.getElementById("btn-start-batch-csv");
+    if (csvBtn) {
+        csvBtn.addEventListener("click", () => startBatchExport("csv"));
+    }
 
     // 模态框选项卡切换
     const tabButtons = document.querySelectorAll(".tab-btn");
@@ -456,7 +494,9 @@ function updateBatchPanelStats() {
     document.getElementById("stat-selected-files").innerText = selectedCount;
     
     const startBtn = document.getElementById("btn-start-batch");
-    startBtn.disabled = selectedCount === 0;
+    const csvBtn = document.getElementById("btn-start-batch-csv");
+    if (startBtn) startBtn.disabled = selectedCount === 0;
+    if (csvBtn) csvBtn.disabled = selectedCount === 0;
 }
 
 // ----------------------------------------------------------------
@@ -789,7 +829,7 @@ function saveModalConfig() {
 // ----------------------------------------------------------------
 
 // 异步顺序解析“被勾选但从未配置过”的文件，生成默认参数后再批量导出
-async function startBatchExport() {
+async function startBatchExport(format = "xlsx") {
     const checkboxes = document.querySelectorAll(".file-select-checkbox:checked");
     const selectedPaths = Array.from(checkboxes).map(cb => cb.getAttribute("data-path"));
     
@@ -804,9 +844,14 @@ async function startBatchExport() {
         return;
     }
     
-    const startBtn = document.getElementById("btn-start-batch");
-    startBtn.disabled = true;
-    startBtn.innerHTML = `<span>⏳ 正在自动解析未配置的文件...</span>`;
+    const excelBtn = document.getElementById("btn-start-batch");
+    const csvBtn = document.getElementById("btn-start-batch-csv");
+    
+    if (excelBtn) excelBtn.disabled = true;
+    if (csvBtn) csvBtn.disabled = true;
+    
+    const activeBtn = (format === "csv" && csvBtn) ? csvBtn : excelBtn;
+    activeBtn.innerHTML = `<span>⏳ 正在自动解析未配置的文件...</span>`;
     
     try {
         const finalConfigs = [];
@@ -818,7 +863,7 @@ async function startBatchExport() {
             
             if (!config) {
                 // 自动进行 inspect
-                startBtn.innerHTML = `<span>⏳ 正在解析 [${i+1}/${selectedPaths.length}] 的元数据...</span>`;
+                activeBtn.innerHTML = `<span>⏳ 正在解析 [${i+1}/${selectedPaths.length}] 的元数据...</span>`;
                 
                 const response = await fetch("/api/inspect", {
                     method: "POST",
@@ -851,6 +896,20 @@ async function startBatchExport() {
                  state.fileConfigs[path] = config;
              }
              
+             // 强制根据当前点击的批量导出类型重写后缀名，以响应用户所点按钮
+             let targetName = config.customName;
+             if (format === "csv") {
+                 targetName = targetName.replace(/\.xlsx$/i, ".csv");
+                 if (!targetName.endsWith(".csv")) {
+                     targetName += ".csv";
+                 }
+             } else {
+                 targetName = targetName.replace(/\.csv$/i, ".xlsx");
+                 if (!targetName.endsWith(".xlsx")) {
+                     targetName += ".xlsx";
+                 }
+             }
+             
              finalConfigs.push({
                  filePath: config.filePath,
                  selectedFields: config.selectedFields,
@@ -860,14 +919,14 @@ async function startBatchExport() {
                  endTimeStr: config.endTimeStr || null,
                  baseDate: config.baseDate || "1970-01-01 00:00:00",
                  interval: config.interval,
-                 customName: config.customName,
+                 customName: targetName,
                  tempUnit: config.tempUnit || "degC",
                  presUnit: config.presUnit || "PSI"
              });
          }
         
         // 发送导出请求给后端
-        startBtn.innerHTML = `<span>⏳ 正在提交导出任务...</span>`;
+        activeBtn.innerHTML = `<span>⏳ 正在提交导出任务...</span>`;
         const exportResponse = await fetch("/api/export", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -885,7 +944,7 @@ async function startBatchExport() {
         const exportResult = await exportResponse.json();
         const taskIds = exportResult.taskIds; // 后端分配的 UUID 列表
         
-        // 渲染进度卡片
+        // 展开进度条面板并展示任务卡片
         showProgressPanel(taskIds, finalConfigs);
         
         // 开启定时器轮询进度
@@ -893,8 +952,14 @@ async function startBatchExport() {
         
     } catch(e) {
         showToast(e.message, "error");
-        startBtn.disabled = false;
-        startBtn.innerText = "🚀 开始多线程批量导出";
+        if (excelBtn) {
+            excelBtn.disabled = false;
+            excelBtn.innerHTML = `<span>🚀 批量导出为 Excel (.xlsx)</span>`;
+        }
+        if (csvBtn) {
+            csvBtn.disabled = false;
+            csvBtn.innerHTML = `<span>⚡ 批量导出为 CSV (.csv)</span>`;
+        }
     }
 }
 
@@ -949,8 +1014,15 @@ function startPolling(taskIds) {
             
             // 恢复批量按钮
             const startBtn = document.getElementById("btn-start-batch");
-            startBtn.disabled = false;
-            startBtn.innerText = "🚀 开始多线程批量导出";
+            const csvBtn = document.getElementById("btn-start-batch-csv");
+            if (startBtn) {
+                startBtn.disabled = false;
+                startBtn.innerHTML = "<span>🚀 批量导出为 Excel (.xlsx)</span>";
+            }
+            if (csvBtn) {
+                csvBtn.disabled = false;
+                csvBtn.innerHTML = "<span>⚡ 批量导出为 CSV (.csv)</span>";
+            }
             
             document.getElementById("progress-summary").innerText = "批量处理完毕";
             document.getElementById("progress-summary").className = "badge";
@@ -1027,6 +1099,7 @@ async function selectDirectory(targetInputId, storageKey) {
         if (data.path) {
             document.getElementById(targetInputId).value = data.path;
             localStorage.setItem(storageKey, data.path);
+            saveConfigToBackend(storageKey, data.path);
             showToast(`已成功选择路径: ${data.path}`, "success");
             
             // 如果是源文件夹改变，且导出文件夹为空，自动同步
@@ -1035,6 +1108,7 @@ async function selectDirectory(targetInputId, storageKey) {
                 if (!outInput.value.trim()) {
                     outInput.value = data.path;
                     localStorage.setItem("h5_out_path", data.path);
+                    saveConfigToBackend("h5_out_path", data.path);
                 }
                 // 浏览目录后自动扫描
                 scanDirectory(data.path);
@@ -1056,6 +1130,8 @@ function getPresets() {
 // 保存常用配置
 function savePresets(presets) {
     localStorage.setItem("h5_field_presets", JSON.stringify(presets));
+    saveConfigToBackend("h5_field_presets", presets);
+    loadTemplates();
 }
 
 // 载入并渲染常用配置模板下拉菜单与批量应用下拉框
@@ -1109,7 +1185,8 @@ function loadBatchPresetsTags() {
         
         // 样式适配 CNOOC 风格，和行内样式统一
         badge.style.cssText = `
-            display: inline-block;
+            display: inline-flex;
+            align-items: center;
             padding: 3px 8px;
             font-size: 11px;
             border-radius: 12px;
@@ -1135,6 +1212,46 @@ function loadBatchPresetsTags() {
             badge.style.color = "var(--primary, #007aff)";
             badge.style.transform = "none";
         });
+        
+        // 创建一个小 deletion span
+        const deleteSpan = document.createElement("span");
+        deleteSpan.innerText = "×";
+        deleteSpan.title = "删除此常用配置";
+        deleteSpan.style.cssText = `
+            margin-left: 6px;
+            font-weight: bold;
+            cursor: pointer;
+            color: inherit;
+            opacity: 0.6;
+            transition: opacity 0.2s ease, background-color 0.2s ease;
+            display: inline-block;
+            width: 14px;
+            height: 14px;
+            line-height: 12px;
+            text-align: center;
+            border-radius: 50%;
+            font-size: 13px;
+        `;
+        deleteSpan.addEventListener("mouseenter", () => {
+            deleteSpan.style.opacity = "1";
+            deleteSpan.style.backgroundColor = "rgba(220, 53, 69, 0.2)";
+            deleteSpan.style.color = "var(--danger, #dc3545)";
+        });
+        deleteSpan.addEventListener("mouseleave", () => {
+            deleteSpan.style.opacity = "0.6";
+            deleteSpan.style.backgroundColor = "transparent";
+            deleteSpan.style.color = "inherit";
+        });
+        deleteSpan.addEventListener("click", (e) => {
+            e.stopPropagation(); // 阻止冒泡，避免应用模板配置
+            if (confirm(`是否确定删除常用配置模板 "${name}"？`)) {
+                const presets = getPresets();
+                delete presets[name];
+                savePresets(presets);
+                showToast("模板已成功删除", "success");
+            }
+        });
+        badge.appendChild(deleteSpan);
         
         // 点击批量应用该配置模板
         badge.addEventListener("click", async () => {

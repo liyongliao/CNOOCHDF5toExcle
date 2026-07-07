@@ -642,6 +642,7 @@ def browse_directory():
         # Windows 优先使用 win32 ctypes 接口，实现毫秒级瞬时弹窗 (不依赖任何外部 GUI/Shell 进程)
         try:
             import ctypes
+            from ctypes import wintypes
             
             class BROWSEINFO(ctypes.Structure):
                 _fields_ = [
@@ -655,8 +656,26 @@ def browse_directory():
                     ("iImage", ctypes.c_int)
                 ]
             
+            shell32 = ctypes.windll.shell32
+            ole32 = ctypes.windll.ole32
+            user32 = ctypes.windll.user32
+            
+            # 必须显式设置 restype 和 argtypes，防止 64 位 Windows 系统下指针被截断为 32 位 int 导致崩溃并触发 Tkinter 兜底
+            shell32.SHBrowseForFolderW.restype = ctypes.c_void_p
+            shell32.SHBrowseForFolderW.argtypes = [ctypes.c_void_p]
+            
+            shell32.SHGetPathFromIDListW.restype = wintypes.BOOL
+            shell32.SHGetPathFromIDListW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+            
+            ole32.CoTaskMemFree.restype = None
+            ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+            
+            user32.GetForegroundWindow.restype = ctypes.c_void_p
+            user32.GetForegroundWindow.argtypes = []
+            
             bi = BROWSEINFO()
-            bi.hwndOwner = None
+            # 获取当前浏览器/前台窗口句柄，使弹窗显示在最前端，防止隐藏在浏览器后面
+            bi.hwndOwner = user32.GetForegroundWindow()
             bi.pidlRoot = None
             bi.pszDisplayName = None
             bi.lpszTitle = "请选择文件夹:"
@@ -665,12 +684,12 @@ def browse_directory():
             bi.lParam = None
             bi.iImage = 0
             
-            pidl = ctypes.windll.shell32.SHBrowseForFolderW(ctypes.byref(bi))
+            pidl = shell32.SHBrowseForFolderW(ctypes.byref(bi))
             if pidl:
                 path_buf = ctypes.create_unicode_buffer(260)
-                if ctypes.windll.shell32.SHGetPathFromIDListW(pidl, path_buf):
+                if shell32.SHGetPathFromIDListW(pidl, path_buf):
                     path = path_buf.value
-                ctypes.windll.ole32.CoTaskMemFree(pidl)
+                ole32.CoTaskMemFree(pidl)
         except Exception as e_c:
             # win32 API 异常时，以 tkinter 动作做第一级备份
             try:
@@ -840,6 +859,44 @@ def cancel_task(taskId: str):
                 TASKS[taskId]["error"] = "Cancelled by user"
                 return {"success": True}
     return {"success": False, "detail": "任务已完成或不存在"}
+
+# ----------------------------------------------------------------
+# 本地持久化配置管理 (解决不同端口下 localStorage 丢失的问题)
+# ----------------------------------------------------------------
+import json
+
+CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+
+def read_local_config():
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"读取本地配置文件失败: {e}")
+    return {"h5_src_path": "", "h5_out_path": "", "h5_field_presets": {}}
+
+def write_local_config(config_data):
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(config_data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"写入本地配置文件失败: {e}")
+
+@app.get("/api/config")
+def get_config():
+    """获取本地配置文件内容"""
+    return read_local_config()
+
+@app.post("/api/config")
+def save_config(payload: dict):
+    """保存/更新本地配置文件内容"""
+    current_config = read_local_config()
+    for k, v in payload.items():
+        current_config[k] = v
+    write_local_config(current_config)
+    return {"status": "ok"}
+
 
 @app.get("/")
 def read_root():

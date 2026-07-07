@@ -60,9 +60,14 @@
                             <span id="stat-selected-files" class="val text-highlight">0</span>
                         </div>
                     </div>
-                    <button id="btn-start-batch" class="btn btn-success btn-large btn-block" disabled>
-                        🚀 开始多线程批量导出
-                    </button>
+                    <div style="display: flex; flex-direction: column; gap: 8px; width: 100%;">
+                        <button id="btn-start-batch" class="btn btn-success btn-large btn-block" disabled style="margin-bottom: 0;">
+                            🚀 批量导出为 Excel (.xlsx)
+                        </button>
+                        <button id="btn-start-batch-csv" class="btn btn-csv btn-large btn-block" disabled style="margin-bottom: 0;">
+                            ⚡ 批量导出为 CSV (.csv)
+                        </button>
+                    </div>
                 </div>
             </section>
 
