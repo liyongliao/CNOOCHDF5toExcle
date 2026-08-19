@@ -1,0 +1,36 @@
+{
+  "h5_src_path": "/Users/liyong/Documents/廖黎勇/04-开发项目/井下压力/生产环境h5文件/",
+  "h5_out_path": "/Users/liyong/Documents/廖黎勇/04-开发项目/井下压力/生产环境h5文件/",
+  "h5_field_presets": {
+    "普通井口": {
+      "fields": [
+        "EQRTZ S1 PRES PSI A",
+        "EQRTZ S1 TEMP CELSIUS A"
+      ],
+      "timeField": "Conforming Time Series/Common-FIC1 Timestamp-Gauge-A",
+      "timeType": "timestamp_seconds",
+      "startTimeStr": "",
+      "endTimeStr": "",
+      "baseDate": "1970-01-01 00:00:00",
+      "interval": 10,
+      "tempUnit": "degC",
+      "presUnit": "PSI"
+    },
+    "P2-P12": {
+      "fields": [
+        "FIC S1 GAUGE A PRESSURE ENG32",
+        "FIC S1 GAUGE A TEMP ENG32",
+        "FIC S2 GAUGE A PRESSURE ENG32",
+        "FIC S2 GAUGE A TEMP ENG32"
+      ],
+      "timeField": "Conforming Time Series/Common-FIC1 Timestamp-Gauge-A",
+      "timeType": "",
+      "startTimeStr": "",
+      "endTimeStr": "",
+      "baseDate": "1970-01-01 00:00:00",
+      "interval": 10,
+      "tempUnit": "degC",
+      "presUnit": "PSI"
+    }
+  }
+}

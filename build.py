@@ -47,6 +47,7 @@ def build_executable():
         "PyInstaller",
         "--onefile",
         f"--add-data=static{separator}static",
+        f"--add-data=config.json{separator}.",
         "--name=H5ToExcelConverter",
         "run.py"
     ]
@@ -55,12 +56,24 @@ def build_executable():
     
     try:
         subprocess.check_call(cmd)
+        
+        # 自动将 config.json 复制到 dist 目录，确保打包产物同级目录下有配置文件
+        dist_dir = os.path.join(base_dir, "dist")
+        src_config = os.path.join(base_dir, "config.json")
+        dist_config = os.path.join(dist_dir, "config.json")
+        if os.path.exists(src_config):
+            os.makedirs(dist_dir, exist_ok=True)
+            shutil.copyfile(src_config, dist_config)
+            print(f"已自动复制 config.json 至 dist 目录: {dist_config}")
+            
         print("\n==================================================")
         print(" 🎉 打包成功完成！")
         if sys.platform == "win32":
             print(" Windows 可执行程序位于: dist\\H5ToExcelConverter.exe")
+            print(" 配置文件位于: dist\\config.json")
         else:
             print(f" 您的可执行程序位于: dist/H5ToExcelConverter")
+            print(f" 配置文件位于: dist/config.json")
         print("==================================================")
     except Exception as e:
         print(f"\n[错误] 打包失败: {e}")

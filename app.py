@@ -14,12 +14,18 @@ from concurrent.futures import ThreadPoolExecutor
 
 app = FastAPI(title="HDF5 to Excel Converter Backend")
 
-# 获取当前脚本所在绝对路径（如果是 PyInstaller 打包后的环境，使用 sys._MEIPASS 作为静态资源根路径）
+# 获取当前运行环境路径
 import sys
 if getattr(sys, 'frozen', False):
+    # PyInstaller 打包后的环境：
+    # 静态资源从临时解压目录 sys._MEIPASS 中读取
     base_dir = sys._MEIPASS
+    # 配置文件及用户数据存储在可执行文件所在的实际物理目录中
+    app_dir = os.path.dirname(os.path.abspath(sys.executable))
 else:
+    # 源码开发运行环境：
     base_dir = os.path.dirname(os.path.abspath(__file__))
+    app_dir = base_dir
 
 # 内存中保存的导出任务状态
 TASKS = {}
@@ -865,23 +871,41 @@ def cancel_task(taskId: str):
 # ----------------------------------------------------------------
 import json
 
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+CONFIG_FILE = os.path.join(app_dir, "config.json")
+BUNDLED_CONFIG_FILE = os.path.join(base_dir, "config.json")
 
 def read_local_config():
+    # 1. 优先读取可执行文件同级目录下的 config.json
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
-            print(f"读取本地配置文件失败: {e}")
+            print(f"读取本地配置文件失败 ({CONFIG_FILE}): {e}")
+
+    # 2. 若同级目录不存在，尝试从内置打包资源中读取默认模板
+    if os.path.exists(BUNDLED_CONFIG_FILE):
+        try:
+            with open(BUNDLED_CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                # 自动将内置模板写一份到 exe 同级目录，方便用户直接查看和修改
+                try:
+                    write_local_config(data)
+                except Exception:
+                    pass
+                return data
+        except Exception as e:
+            print(f"读取内置配置文件失败 ({BUNDLED_CONFIG_FILE}): {e}")
+
     return {"h5_src_path": "", "h5_out_path": "", "h5_field_presets": {}}
 
 def write_local_config(config_data):
     try:
+        os.makedirs(os.path.dirname(os.path.abspath(CONFIG_FILE)), exist_ok=True)
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(config_data, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        print(f"写入本地配置文件失败: {e}")
+        print(f"写入本地配置文件失败 ({CONFIG_FILE}): {e}")
 
 @app.get("/api/config")
 def get_config():
