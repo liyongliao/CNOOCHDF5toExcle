@@ -97,6 +97,41 @@ class Interface:
         self.label(parent, text=title, font=self.heading).pack(side="left", padx=(8, 0))
 
 
+class ModernProgressBar(ctk.CTkProgressBar):
+    """Use a slim CTk track while retaining the export's percentage API."""
+
+    def __init__(self, parent, *, maximum=100, **options):
+        self._maximum = float(maximum)
+        self._percentage = 0.0
+        super().__init__(parent, **options)
+        self.set(0)
+
+    def __getitem__(self, key):
+        return self.cget(key)
+
+    def __setitem__(self, key, value):
+        self.configure(**{key: value})
+
+    def cget(self, attribute):
+        if attribute == "value":
+            return self._percentage
+        if attribute == "maximum":
+            return self._maximum
+        return super().cget(attribute)
+
+    def configure(self, require_redraw=False, **options):
+        value = options.pop("value", None)
+        super().configure(require_redraw=require_redraw, **options)
+        if value is not None:
+            self._percentage = max(0.0, min(self._maximum, float(value)))
+            self.set(self._percentage / self._maximum)
+
+    def start(self, interval=None):
+        # CTk schedules its own smooth animation; legacy callers pass a Tk
+        # interval that is unnecessary for its internal animation loop.
+        super().start()
+
+
 def default_fields(datasets: list[dict], time_field: Optional[str]) -> list[str]:
     """Match the established web application's pressure/temperature defaults."""
     paths = [item["path"] for item in datasets if item["path"] != time_field]
@@ -244,9 +279,6 @@ class DesktopApp:
         style.map("Modern.Treeview.Heading", background=[("active", "#EDF3FF")],
                   relief=[("active", "flat"), ("pressed", "flat")])
         style.layout("Modern.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
-        style.configure("Modern.Horizontal.TProgressbar", background=ui.accent,
-                        troughcolor="#E5ECF7", borderwidth=0, thickness=round(4 * scale),
-                        lightcolor=ui.accent, darkcolor=ui.accent)
 
         outer = ui.frame(root)
         outer.pack(fill="both", expand=True, padx=18, pady=12)
@@ -378,8 +410,9 @@ class DesktopApp:
         self.open_button = ui.button(actions, "打开结果文件夹", self.open_output, quiet=True,
                                       width=130, state="disabled")
         self.open_button.pack(side="right")
-        self.progress = ttk.Progressbar(footer, maximum=100, mode="determinate",
-                                        style="Modern.Horizontal.TProgressbar")
+        self.progress = ModernProgressBar(footer, maximum=100, mode="determinate", height=4,
+                                           corner_radius=2, border_width=0,
+                                           fg_color="#E5ECF7", progress_color=ui.accent)
         self.progress.grid(row=1, column=0, sticky="ew")
         self.log = tk.Text(footer, height=1, borderwidth=0, highlightthickness=0,
                            background=ui.background, foreground=ui.muted, font=(ui.family, -round(12 * scale)),

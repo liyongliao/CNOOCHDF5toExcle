@@ -20,6 +20,7 @@ DefaultGroupName={code:GetShortcutName}
 PrivilegesRequired=lowest
 UsePreviousAppDir=no
 UsePreviousGroup=no
+UsePreviousLanguage=no
 DisableProgramGroupPage=yes
 DisableReadyPage=yes
 WizardStyle=modern dynamic

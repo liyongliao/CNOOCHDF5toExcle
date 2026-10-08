@@ -28,12 +28,18 @@ def main():
     root = Path(arguments.directory)
     files = []
     totals = {}
-    forbidden = ("pydantic", "fastapi", "uvicorn", "starlette", "pandas", "scipy", "libssl", "libcrypto")
+    forbidden = ("pydantic", "pydantic_core", "fastapi", "uvicorn", "starlette", "pandas", "scipy")
     for path in sorted(root.rglob("*")):
         if not path.is_file():
             continue
         relative = path.relative_to(root).as_posix()
-        if any(part in relative.lower() for part in forbidden):
+        components = relative.lower().split("/")
+        # NumPy's required OpenBLAS DLL is named libscipy_openblas*. Match
+        # package components instead of mistaking that DLL for SciPy itself.
+        unwanted_package = any(component == package or component.startswith((package + ".", package + "-"))
+                               for component in components for package in forbidden)
+        unwanted_tls = path.name.lower().startswith(("libssl", "libcrypto"))
+        if unwanted_package or unwanted_tls:
             raise RuntimeError("Desktop includes unwanted dependency: " + relative)
         if path.suffix.lower() == ".zip" and path.name != "base_library.zip":
             raise RuntimeError("Unexpected nested archive: " + relative)
