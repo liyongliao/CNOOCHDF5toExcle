@@ -41,6 +41,9 @@ def run_web():
 
 
 def main(argv=None):
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     arguments = list(sys.argv[1:] if argv is None else argv)
     if "--web" in arguments and "--help" not in arguments and "-h" not in arguments:
         if arguments != ["--web"]:

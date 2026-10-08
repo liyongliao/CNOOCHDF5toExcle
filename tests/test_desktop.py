@@ -125,7 +125,9 @@ class DesktopTests(unittest.TestCase):
             else:
                 self.root.quit()
 
-        deadline = self.root.after(2500, self.root.quit)
+        # Cold Windows font setup and shared CI CPUs can delay redraws; wait
+        # for the three actual layouts without treating a slow runner as a bug.
+        deadline = self.root.after(15000, self.root.quit)
         self.root.after(25, finish_when_idle)
         self.root.mainloop()
         self.root.after_cancel(deadline)

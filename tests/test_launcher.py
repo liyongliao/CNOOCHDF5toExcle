@@ -1,5 +1,6 @@
 """Startup must stay independent of the scientific engine and GUI availability."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -19,7 +20,8 @@ class LauncherTests(unittest.TestCase):
 
     def test_help_works_without_initializing_a_window(self):
         result = subprocess.run([sys.executable, str(ROOT / 'run.py'), '--help'],
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+                                env=dict(os.environ, PYTHONIOENCODING="ascii"))
         self.assertIn(b'--self-test', result.stdout)
         self.assertIn(b'--web', result.stdout)
 

@@ -12,7 +12,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: windows-build-${{ github.ref }}
+  # A branch push and its open PR should share one build instead of running
+  # the same x64/x86 compilation twice.
+  group: windows-build-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
