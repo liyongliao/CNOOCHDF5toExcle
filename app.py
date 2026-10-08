@@ -1,47 +1,53 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+"""HDF5 conversion service shared by the desktop application and optional web UI."""
+from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional
+from concurrent.futures import ThreadPoolExecutor
+import csv
+import datetime
+import json
+import math
 import os
+import re
+import struct
+import sys
+import tempfile
+import threading
+import time
+import uuid
+
 import h5py
 import numpy as np
-import pandas as pd
-import datetime
-import threading
-import uuid
-from concurrent.futures import ThreadPoolExecutor
 
 app = FastAPI(title="HDF5 to Excel Converter Backend")
-
-# 获取当前运行环境路径
-import sys
-if getattr(sys, 'frozen', False):
-    # PyInstaller 打包后的环境：
-    # 静态资源从临时解压目录 sys._MEIPASS 中读取
-    base_dir = sys._MEIPASS
-    # 配置文件及用户数据存储在可执行文件所在的实际物理目录中
-    app_dir = os.path.dirname(os.path.abspath(sys.executable))
-else:
-    # 源码开发运行环境：
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    app_dir = base_dir
-
-# 内存中保存的导出任务状态
+base_dir = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+app_dir = os.path.dirname(os.path.abspath(sys.executable)) if getattr(sys, "frozen", False) else base_dir
+IS_32_BIT = struct.calcsize("P") == 4
+MAX_EXPORT_ROWS = 2_000_000
+MAX_SOURCE_MEMORY = 384 * 1024**2 if IS_32_BIT else 1024**3
+CHUNK_ROWS = 8192
+MAX_CHUNK_MEMORY = (16 if IS_32_BIT else 32) * 1024**2
+MAX_ROWS_PER_SHEET = 1_040_000
+MAX_TASK_HISTORY = 100
+MAX_ACTIVE_TASKS = 64
+TIME_KEYWORDS = {"time", "timestamp", "datetime", "date", "t", "epoch", "sec", "utc", "elapsed"}
+TIME_TYPES = {"timestamp_seconds", "timestamp_ms", "relative_seconds", "string", "unknown_string"}
 TASKS = {}
-tasks_lock = threading.Lock()
+_TASK_CANCEL = {}
+_TASK_FUTURES = {}
+tasks_lock = threading.RLock()
+executor = ThreadPoolExecutor(max_workers=1 if IS_32_BIT else 2, thread_name_prefix="hdf5-export")
 
-# 限制并发导出线程数为 4
-executor = ThreadPoolExecutor(max_workers=4)
-
-# 启发式识别时间列的关键词列表
-TIME_KEYWORDS = ["time", "timestamp", "datetime", "date", "t", "epoch", "sec", "utc", "elapsed"]
 
 class ScanPayload(BaseModel):
     path: str
 
+
 class InspectPayload(BaseModel):
     path: str
+
 
 class ExportConfig(BaseModel):
     filePath: str
@@ -56,552 +62,633 @@ class ExportConfig(BaseModel):
     tempUnit: Optional[str] = "degC"
     presUnit: Optional[str] = "PSI"
 
+
 class ExportPayload(BaseModel):
     configs: List[ExportConfig]
     outputDir: str
 
-# ----------------------------------------------------------------
-# 核心辅助函数
-# ----------------------------------------------------------------
+
+def _text(value):
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def is_time_field(field_path: str) -> bool:
+    """Recognise time tokens without treating the 't' in 'value' as time."""
+    name = field_path.rsplit(":", 1)[-1].split("/")[-1].lower()
+    if "temp" in name:
+        return False
+    tokens = re.split(r"[^a-z0-9]+", name)
+    return any(token in TIME_KEYWORDS for token in tokens) or any(
+        keyword in name for keyword in ("timestamp", "datetime", "elapsed", "epoch")
+    ) or name.startswith("time") or name.endswith("time")
+
+
+def _vector_size(ds):
+    shape = ds.shape
+    if shape is None:
+        return None
+    if len(shape) == 1:
+        return shape[0]
+    if len(shape) == 2 and 1 in shape:
+        return shape[0] * shape[1]
+    return None
+
 
 def find_datasets(group, prefix="") -> list:
-    """递归查找 H5 文件中所有可导出的一维、等价一维的数据集"""
     datasets = []
     for name, item in group.items():
         path = f"{prefix}/{name}" if prefix else name
-        if isinstance(item, h5py.Dataset):
-            shape = item.shape
-            if len(shape) != 1 and not (len(shape) == 2 and (shape[0] == 1 or shape[1] == 1)):
-                continue
-                
-            size = int(shape[0]) if len(shape) == 1 else int(max(shape))
-            
-            # 判断是否为复合结构体 (Compound) 类型数据，如 [('time', '<u4'), ('value', '<f4')]
-            if item.dtype.names is not None:
-                # 检查是否包含时间字段和数值字段
-                has_time = any(any(t_kw in n.lower() for t_kw in TIME_KEYWORDS) for n in item.dtype.names)
-                non_time_fields = [n for n in item.dtype.names if not any(t_kw in n.lower() for t_kw in TIME_KEYWORDS)]
-                
-                if has_time and len(non_time_fields) > 0:
-                    # 作为一个整体的时间序列数据集显示，不单独展开其内部子字段
-                    datasets.append({
-                        "path": path,
-                        "shape": shape,
-                        "dtype": "Compound (Time Series)",
-                        "size": size
-                    })
-                else:
-                    # 否则，展开子字段
-                    for sub_name in item.dtype.names:
-                        datasets.append({
-                            "path": f"{path}:{sub_name}",
-                            "shape": shape,
-                            "dtype": str(item.dtype[sub_name]),
-                            "size": size
-                        })
-            else:
-                datasets.append({
-                    "path": path,
-                    "shape": shape,
-                    "dtype": str(item.dtype),
-                    "size": size
-                })
-        elif isinstance(item, h5py.Group):
+        if isinstance(item, h5py.Group):
             datasets.extend(find_datasets(item, path))
+            continue
+        if not isinstance(item, h5py.Dataset):
+            continue
+        size = _vector_size(item)
+        if size is None:
+            continue
+        entry = {"path": path, "shape": item.shape, "dtype": str(item.dtype), "size": size}
+        if item.dtype.names:
+            times = [n for n in item.dtype.names if is_time_field(n)]
+            values = [n for n in item.dtype.names if not is_time_field(n)]
+            if times and len(values) == 1:
+                entry.update(dtype="Compound (Time Series)", timeField=f"{path}:{times[0]}")
+                datasets.append(entry)
+            else:
+                for member in item.dtype.names:
+                    datasets.append(dict(entry, path=f"{path}:{member}", dtype=str(item.dtype[member])))
+        else:
+            datasets.append(entry)
     return datasets
 
-def is_time_field(field_path: str) -> bool:
-    """启发式判断某个字段路径是否为时间字段"""
-    name = field_path.split("/")[-1].replace(":", "_").lower()
-    if "temp" in name:
-        return False
-    if name in TIME_KEYWORDS:
-        return True
-    tokens = name.replace("-", "_").split("_")
-    for token in tokens:
-        if token in TIME_KEYWORDS:
-            return True
-    for kw in ["time", "timestamp", "datetime", "date", "epoch", "elapsed"]:
-        if kw in name:
-            return True
-    return False
 
 def detect_time_dataset(datasets: list) -> Optional[str]:
-    """启发式匹配时间列"""
     for ds in datasets:
-        name = ds["path"].split("/")[-1].replace(":", "_").lower()
-        if name in TIME_KEYWORDS:
-            return ds["path"]
+        if ds["path"].rsplit(":", 1)[-1].split("/")[-1].lower() in TIME_KEYWORDS:
+            return ds.get("timeField") or ds["path"]
     for ds in datasets:
         if is_time_field(ds["path"]):
-            return ds["path"]
+            return ds.get("timeField") or ds["path"]
+    for ds in datasets:
+        if ds.get("timeField"):
+            return ds["timeField"]
     return None
 
-def parse_time_array(time_array) -> tuple:
-    """解析时间列的格式、最小值、最大值"""
-    if len(time_array) == 0:
-        return "empty", None, None
-        
-    first_val = time_array[0]
-    if isinstance(first_val, (bytes, str)):
-        try:
-            sample_str = first_val.decode('utf-8') if isinstance(first_val, bytes) else first_val
-            pd.to_datetime(sample_str)
-            return "string", None, None
-        except Exception:
-            return "unknown_string", None, None
-            
+
+def _date_timestamp(value):
+    text = _text(value).strip()
+    if not text:
+        raise ValueError("时间不能为空")
+    text = text.replace("/", "-")
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
     try:
-        min_val = float(np.min(time_array))
-        max_val = float(np.max(time_array))
-    except Exception:
+        dt = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        dt = None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d", "%Y%m%d %H:%M:%S"):
+            try:
+                dt = datetime.datetime.strptime(text, fmt)
+                break
+            except ValueError:
+                continue
+        if dt is None:
+            raise ValueError("时间格式无效，应为 YYYY-MM-DD HH:MM:SS 或 YYYY/M/D")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.timestamp()
+
+
+def parse_time_array(time_array) -> tuple:
+    arr = np.asarray(time_array).reshape(-1)
+    if not arr.size:
+        return "empty", None, None
+    if arr.dtype.kind in "SUO":
+        for value in arr[:32]:
+            try:
+                _date_timestamp(value)
+                return "string", None, None
+            except (ValueError, TypeError, OverflowError):
+                continue
+        return "unknown_string", None, None
+    try:
+        values = arr.astype(np.float64, copy=False)
+        valid = values[np.isfinite(values)]
+        if not valid.size:
+            return "error_numeric", None, None
+        low, high = float(np.min(valid)), float(np.max(valid))
+    except (TypeError, ValueError):
         return "error_numeric", None, None
-        
-    if 1e9 < min_val < 3e9:
-        return "timestamp_seconds", min_val, max_val
-    elif 1e12 < min_val < 3e12:
-        return "timestamp_ms", min_val, max_val
-    else:
-        return "relative_seconds", min_val, max_val
+    if 1e9 < low < 3e9:
+        return "timestamp_seconds", low, high
+    if 1e12 < low < 3e12:
+        return "timestamp_ms", low, high
+    return "relative_seconds", low, high
+
 
 def convert_time_array_to_float_timestamps(t_orig_raw, t_type, baseDate) -> np.ndarray:
-    if t_type in ["string", "unknown_string"]:
-        t_orig_strs = []
-        for x in t_orig_raw:
-            if isinstance(x, bytes):
-                try:
-                    t_orig_strs.append(x.decode('utf-8'))
-                except Exception:
-                    t_orig_strs.append("")
-            elif isinstance(x, str):
-                t_orig_strs.append(x)
-            else:
-                if hasattr(x, 'decode'):
-                    try:
-                        t_orig_strs.append(x.decode('utf-8'))
-                    except Exception:
-                        t_orig_strs.append("")
-                else:
-                    t_orig_strs.append(str(x))
-        s = pd.to_datetime(t_orig_strs, errors='coerce')
-        t_orig = s.values.astype('datetime64[s]').astype(float)
-        t_orig[t_orig < 0] = np.nan
-        return t_orig
-        
-    try:
-        t_orig = t_orig_raw.astype(float)
-    except Exception:
-        t_orig_strs = []
-        for x in t_orig_raw:
-            if hasattr(x, 'decode'):
-                try:
-                    t_orig_strs.append(x.decode('utf-8'))
-                except Exception:
-                    t_orig_strs.append("")
-            else:
-                t_orig_strs.append(str(x))
-        s = pd.to_datetime(t_orig_strs, errors='coerce')
-        t_orig = s.values.astype('datetime64[s]').astype(float)
-        t_orig[t_orig < 0] = np.nan
-        return t_orig
-
+    raw = np.asarray(t_orig_raw).reshape(-1)
+    if t_type in ("string", "unknown_string") or raw.dtype.kind in "SUO":
+        result = np.full(len(raw), np.nan, dtype=np.float64)
+        for index, value in enumerate(raw):
+            try:
+                result[index] = _date_timestamp(value)
+            except (ValueError, TypeError, OverflowError):
+                pass
+        return result
+    result = raw.astype(np.float64, copy=False)
     if t_type == "timestamp_ms":
-        t_orig = t_orig / 1000.0
-    elif t_type == "relative_seconds" and baseDate:
-        try:
-            base_ts = pd.to_datetime(baseDate).tz_localize('UTC').timestamp()
-            t_orig = t_orig + base_ts
-        except Exception:
-            pass
-    return t_orig
+        return result / 1000.0
+    if t_type == "relative_seconds":
+        return result + _date_timestamp(baseDate or "1970-01-01 00:00:00")
+    return result
+
+
+def _prepare_axis(t_orig):
+    times = np.asarray(t_orig, dtype=np.float64).reshape(-1)
+    finite = np.isfinite(times)
+    if not np.any(finite):
+        return np.empty(0, dtype=np.float64), np.empty(0, dtype=np.intp)
+    if np.all(finite) and (len(times) < 2 or np.all(times[1:] >= times[:-1])):
+        return times, None
+    original_indices = np.flatnonzero(finite)
+    times = times[original_indices]
+    if len(times) > 1 and not np.all(times[1:] >= times[:-1]):
+        order = np.argsort(times, kind="stable")
+        times = times[order]
+        original_indices = original_indices[order]
+    return times, original_indices
+
+
+def _nearest_sorted(times, t_grid):
+    indices = np.searchsorted(times, t_grid, side="left")
+    current = np.clip(indices, 0, len(times) - 1)
+    previous = np.clip(indices - 1, 0, len(times) - 1)
+    return np.where(np.abs(times[current] - t_grid) < np.abs(times[previous] - t_grid), current, previous)
+
 
 def find_nearest_indices(t_orig: np.ndarray, t_grid: np.ndarray) -> np.ndarray:
-    """高效的最邻近插值匹配算法"""
-    idx = np.searchsorted(t_orig, t_grid)
-    idx = np.clip(idx, 0, len(t_orig) - 1)
-    
-    idx_prev = np.clip(idx - 1, 0, len(t_orig) - 1)
-    dist_curr = np.abs(t_orig[idx] - t_grid)
-    dist_prev = np.abs(t_orig[idx_prev] - t_grid)
-    
-    final_indices = np.where(dist_curr < dist_prev, idx, idx_prev)
-    return final_indices
+    """Return original row indices, handling unsorted, duplicate and missing times."""
+    times, original_indices = _prepare_axis(t_orig)
+    if not len(times):
+        return np.full(len(t_grid), -1, dtype=np.intp)
+    result = _nearest_sorted(times, t_grid)
+    return result if original_indices is None else original_indices[result]
 
-def save_to_excel_with_meta(df: pd.DataFrame, output_path: str, meta_line: str):
-    """保存 DataFrame 到 Excel 中，支持首行写元数据，并在超出 104 万行时自动分表"""
-    max_rows_per_sheet = 1040000
-    num_rows = len(df)
-    
-    with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-        if num_rows <= max_rows_per_sheet:
-            ws = writer.book.create_sheet(title="Data")
-            ws.cell(row=1, column=1, value=meta_line)
-            df.to_excel(writer, sheet_name="Data", startrow=1, index=False)
-            if "Sheet" in writer.book.sheetnames:
-                writer.book.remove(writer.book["Sheet"])
-        else:
-            num_sheets = (num_rows + max_rows_per_sheet - 1) // max_rows_per_sheet
-            for i in range(num_sheets):
-                start_row = i * max_rows_per_sheet
-                end_row = min((i + 1) * max_rows_per_sheet, num_rows)
-                df_chunk = df.iloc[start_row:end_row]
-                sheet_name = f"Data_Part{i+1}"
-                
-                ws = writer.book.create_sheet(title=sheet_name)
-                ws.cell(row=1, column=1, value=meta_line)
-                df_chunk.to_excel(writer, sheet_name=sheet_name, startrow=1, index=False)
-                
-            if "Sheet" in writer.book.sheetnames:
-                writer.book.remove(writer.book["Sheet"])
-                
-        # 强制格式化所有数据列（除了第一列 Date time），保留 2 位小数，如 1.10 的 0 不被省略
-        for ws in writer.book.worksheets:
-            for col_idx in range(2, ws.max_column + 1):
-                for row_idx in range(3, ws.max_row + 1):
-                    cell = ws.cell(row=row_idx, column=col_idx)
-                    if cell.value is not None:
-                        try:
-                            float(cell.value)
-                            cell.number_format = "0.00"
-                        except (ValueError, TypeError):
-                            pass
+
+class _H5Reader:
+    """Cache one raw read per dataset, including compound time and value members."""
+    def __init__(self, file, check_cancel=lambda: None):
+        self.file = file
+        self.arrays = {}
+        self.check_cancel = check_cancel
+
+    def read(self, field):
+        path, _, member = field.partition(":")
+        ds = self.file[path]
+        if not isinstance(ds, h5py.Dataset) or _vector_size(ds) is None:
+            raise ValueError(f"字段不是一维数据集: {field}")
+        if path not in self.arrays:
+            self.check_cancel()
+            self.arrays[path] = ds[...].reshape(-1)
+            self.check_cancel()
+        raw = self.arrays[path]
+        if member:
+            if not ds.dtype.names or member not in ds.dtype.names:
+                raise ValueError(f"文件内未找到复合字段: {field}")
+            return raw[member]
+        if ds.dtype.names:
+            values = [name for name in ds.dtype.names if not is_time_field(name)]
+            return raw[values[0] if values else ds.dtype.names[0]]
+        return raw
+
 
 def read_field_array(f, field: str) -> np.ndarray:
-    """读取 H5 字段数据，支持复合字段（冒号分隔）、未展开复合字段的数据部分提取"""
-    if ":" in field:
-        ds_path, sub_field = field.split(":", 1)
-        ds = f[ds_path]
-        val_arr = ds[sub_field][:]
-    else:
-        ds = f[field]
-        if ds.dtype.names is not None:
-            # 复合结构体未展开，寻找首个非时间分量作为数值
-            non_time_fields = [n for n in ds.dtype.names if not any(t_kw in n.lower() for t_kw in TIME_KEYWORDS)]
-            if non_time_fields:
-                val_arr = ds[non_time_fields[0]][:]
-            else:
-                val_arr = ds[ds.dtype.names[0]][:]
-        else:
-            val_arr = ds[:]
-            
-    if len(val_arr.shape) == 2:
-        val_arr = val_arr[0, :] if val_arr.shape[0] == 1 else val_arr[:, 0]
-    return val_arr
+    return _H5Reader(f).read(field)
 
-def find_time_array_for_field(f, field_path: str) -> tuple:
-    """寻找字段对应的时间列"""
-    if ":" in field_path:
-        ds_path, sub_field = field_path.split(":", 1)
-        try:
-            ds = f[ds_path]
-            if ds.dtype.names is not None:
-                for name in ds.dtype.names:
-                    if name.lower() in TIME_KEYWORDS:
-                        return f"{ds_path}:{name}", ds[name][:]
-        except Exception:
-            pass
-    else:
-        try:
-            ds = f[field_path]
-            if ds.dtype.names is not None:
-                for name in ds.dtype.names:
-                    if any(t_kw in name.lower() for t_kw in TIME_KEYWORDS):
-                        return f"{field_path}:{name}", ds[name][:]
-        except Exception:
-            pass
 
-    base_field = field_path.split(":", 1)[0] if ":" in field_path else field_path
-    parent_path = os.path.dirname(base_field)
-    base_name = os.path.basename(base_field)
-    
-    try:
-        parent_group = f[parent_path] if parent_path else f
-        for name in parent_group.keys():
-            if name.lower() == f"{base_name.lower()}_time" or name.lower() == f"{base_name.lower()}_timestamp":
-                item = parent_group[name]
-                if isinstance(item, h5py.Dataset):
-                    return f"{parent_path}/{name}" if parent_path else name, item[:]
-        
-        val_len = len(read_field_array(f, field_path))
-        for name, item in parent_group.items():
-            if isinstance(item, h5py.Dataset) and name.lower() in TIME_KEYWORDS:
-                arr = item[:]
-                if len(arr.shape) == 2:
-                    arr = arr[0, :] if arr.shape[0] == 1 else arr[:, 0]
-                if len(arr) == val_len:
-                    return f"{parent_path}/{name}" if parent_path else name, arr
-    except Exception:
-        pass
-        
-    return None, None
+def _time_path_for_field(f, field_path, configured=None, global_time=None):
+    path = field_path.split(":", 1)[0]
+    ds = f[path]
+    length = _vector_size(ds)
+    if ds.dtype.names:
+        for member in ds.dtype.names:
+            if is_time_field(member):
+                return f"{path}:{member}"
+    parent_path, _, name = path.rpartition("/")
+    parent = f[parent_path] if parent_path else f
+    for sibling, item in parent.items():
+        if sibling.lower() in (f"{name.lower()}_time", f"{name.lower()}_timestamp") and isinstance(item, h5py.Dataset):
+            if _vector_size(item) == length:
+                return f"{parent_path}/{sibling}" if parent_path else sibling
+    # A configured global clock takes precedence over a generic sibling clock.
+    for candidate in (configured,):
+        if candidate:
+            candidate_path = candidate.split(":", 1)[0]
+            if candidate_path not in f:
+                raise ValueError(f"文件内未找到时间字段: {candidate}")
+            item = f[candidate_path]
+            if isinstance(item, h5py.Dataset) and _vector_size(item) == length:
+                return candidate
+            raise ValueError(f"所选时间字段的长度与数据不一致: {candidate} / {field_path}")
+    for sibling, item in parent.items():
+        if isinstance(item, h5py.Dataset) and is_time_field(sibling) and not item.dtype.names and _vector_size(item) == length:
+            return f"{parent_path}/{sibling}" if parent_path else sibling
+    if global_time:
+        item = f[global_time.split(":", 1)[0]]
+        if isinstance(item, h5py.Dataset) and _vector_size(item) == length:
+            return global_time
+    return None
+
+
+def find_time_array_for_field(f, field_path: str, time_field=None, reader=None, global_time=None) -> tuple:
+    path = _time_path_for_field(f, field_path, time_field, global_time)
+    return (path, (reader or _H5Reader(f)).read(path)) if path else (None, None)
+
 
 def determine_field_type_and_unit(f, field_path: str, default_temp_unit: str, default_pres_unit: str) -> tuple:
-    """判断字段类型，返回单位名和单位转换函数"""
-    base_field = field_path.split(":", 1)[0] if ":" in field_path else field_path
-    ds = f[base_field]
-    
-    measurement_type = ""
-    uom = ""
-    if "Measurement Type" in ds.attrs:
-        measurement_type = str(ds.attrs["Measurement Type"]).lower()
-    if "UoM" in ds.attrs:
-        uom = str(ds.attrs["UoM"]).lower()
-        
-    name = base_field.split("/")[-1].lower()
-    
-    is_pressure = False
-    if "pressure" in measurement_type or uom == "pa" or "pres" in name:
-        is_pressure = True
-        
-    is_temperature = False
-    if "temperature" in measurement_type or uom in ["°k", "k", "c", "°c", "degc"] or "temp" in name:
-        is_temperature = True
-        
-    if is_pressure:
-        unit = default_pres_unit
-        original_is_psi = ("psi" in uom)
-        
-        if original_is_psi:
-            if unit == "PSI":
-                convert_func = lambda x: x
-            elif unit == "MPa":
-                convert_func = lambda x: x * 0.006894757293
-            elif unit == "kPa":
-                convert_func = lambda x: x * 6.894757293
-            elif unit == "bar":
-                convert_func = lambda x: x * 0.06894757293
-            else:
-                unit = "Pa"
-                convert_func = lambda x: x * 6894.757293
+    path, _, member = field_path.partition(":")
+    ds = f[path]
+    measurement = _text(ds.attrs.get("Measurement Type", "")).lower()
+    original_unit = _text(ds.attrs.get("UoM", "")).strip().lower()
+    name = (member or path.split("/")[-1]).lower()
+    if "pressure" in measurement or original_unit in ("pa", "psi", "mpa", "kpa", "bar") or "pres" in name:
+        unit = default_pres_unit or "PSI"
+        scale_to_pa = {"psi": 6894.757293, "mpa": 1e6, "kpa": 1e3, "bar": 1e5}.get(original_unit, 1.0)
+        divisor = {"PSI": 6894.757293, "MPa": 1e6, "kPa": 1e3, "bar": 1e5, "Pa": 1.0}[unit]
+        return "pressure", unit, lambda values: values * (scale_to_pa / divisor)
+    if "temperature" in measurement or original_unit in ("°k", "k", "c", "°c", "degc", "celsius", "f", "°f", "degf") or "temp" in name:
+        unit = default_temp_unit or "degC"
+        if original_unit in ("c", "°c", "degc", "celsius"):
+            celsius = lambda values: values
+        elif original_unit in ("f", "°f", "degf"):
+            celsius = lambda values: (values - 32.0) / 1.8
         else:
-            if unit == "PSI":
-                convert_func = lambda x: x * 0.00014503773773
-            elif unit == "MPa":
-                convert_func = lambda x: x / 1000000.0
-            elif unit == "kPa":
-                convert_func = lambda x: x / 1000.0
-            elif unit == "bar":
-                convert_func = lambda x: x / 100000.0
-            else:
-                unit = "Pa"
-                convert_func = lambda x: x
-        return "pressure", unit, convert_func
-        
-    elif is_temperature:
-        unit = default_temp_unit
-        is_origin_celsius = "c" in uom or "celsius" in uom
-        
-        if unit == "degC":
-            convert_func = lambda x: x if is_origin_celsius else (x - 273.15)
-        elif unit == "degF":
-            convert_func = lambda x: (x if is_origin_celsius else (x - 273.15)) * 1.8 + 32.0
-        elif unit in ["K", "°K"]:
-            convert_func = lambda x: (x + 273.15) if is_origin_celsius else x
+            celsius = lambda values: values - 273.15
+        if unit == "degF":
+            conversion = lambda values: celsius(values) * 1.8 + 32.0
+        elif unit in ("K", "°K"):
+            conversion = lambda values: celsius(values) + 273.15
         else:
-            unit = "degC"
-            convert_func = lambda x: x if is_origin_celsius else (x - 273.15)
-        return "temperature", unit, convert_func
-    else:
-        return "other", "", lambda x: x
+            conversion = celsius
+        return "temperature", unit, conversion
+    return "other", "", lambda values: values
+
 
 def get_column_header(f, field_path: str, default_temp_unit: str, default_pres_unit: str) -> str:
-    """生成带括弧单位的列名，如 EQRTZ S1 PRES PSI A (PSI)"""
-    base_field = field_path.split(":", 1)[0] if ":" in field_path else field_path
-    ds = f[base_field]
-    ds_name = base_field.split("/")[-1]
-    
-    measurement_type = str(ds.attrs.get("Measurement Type", "")).lower()
-    uom = str(ds.attrs.get("UoM", "")).lower()
-    
-    unit_suffix = ""
-    if "pressure" in measurement_type or uom == "pa" or "pres" in ds_name.lower():
-        unit_suffix = f" ({default_pres_unit})"
-    elif "temperature" in measurement_type or uom in ["°k", "k", "c", "°c", "degc"] or "temp" in ds_name.lower():
-        unit_suffix = f" ({default_temp_unit})"
-    elif "electric current" in measurement_type:
-        unit_suffix = " (A)"
-    elif "electric potential" in measurement_type:
-        unit_suffix = " (Volt)"
-    elif uom:
-        uom_upper = ds.attrs.get("UoM", "")
-        if uom_upper:
-            unit_suffix = f" ({uom_upper})"
-    return f"{ds_name}{unit_suffix}"
+    path, _, member = field_path.partition(":")
+    ds = f[path]
+    name = path.split("/")[-1] + (f":{member}" if member else "")
+    measurement = _text(ds.attrs.get("Measurement Type", "")).lower()
+    _, unit, _ = determine_field_type_and_unit(f, field_path, default_temp_unit, default_pres_unit)
+    if not unit:
+        if "electric current" in measurement:
+            unit = "A"
+        elif "electric potential" in measurement:
+            unit = "Volt"
+        else:
+            unit = _text(ds.attrs.get("UoM", "")).strip()
+    return f"{name} ({unit})" if unit else name
+
 
 def parse_filename_metadata(filename: str) -> tuple:
-    """解析文件名，提取 Well Name、Sn 和 Version"""
-    base = os.path.basename(filename)
-    sn = ""
-    well = ""
-    version = "2.110r512"
-    
-    parts = base.split("-")
+    parts = os.path.basename(filename).split("-")
+    sn, well = "", ""
     if len(parts) >= 2:
-        first = parts[0]
-        if "_" in first:
-            sn = first.split("_")[-1]
-        else:
-            sn = first
+        sn = parts[0].split("_")[-1]
         well = parts[1]
-    return well, sn, version
+    return well, sn, "2.110r512"
 
-# ----------------------------------------------------------------
-# 异步导出工作线程
-# ----------------------------------------------------------------
+
+class ExportCancelled(Exception):
+    pass
+
+
+def _cell_value(value):
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, bytes):
+        return _text(value)
+    if isinstance(value, (int, float)) and not math.isfinite(value):
+        return None
+    return value
+
+
+def _write_excel_rows(headers, rows, row_count, output_path, meta_line, check_cancel=lambda: None, progress=None):
+    from openpyxl import Workbook
+    from openpyxl.cell import WriteOnlyCell
+    workbook = Workbook(write_only=True)
+    worksheet = None
+    cells = None
+    try:
+        for row_index, row in enumerate(rows):
+            if row_index % MAX_ROWS_PER_SHEET == 0:
+                if worksheet is not None:
+                    worksheet.close()
+                title = "Data" if row_count <= MAX_ROWS_PER_SHEET else f"Data_Part{row_index // MAX_ROWS_PER_SHEET + 1}"
+                worksheet = workbook.create_sheet(title=title)
+                worksheet.append([meta_line])
+                header_cells = [WriteOnlyCell(worksheet, value=header) for header in headers]
+                for cell in header_cells:
+                    cell.data_type = "s"
+                worksheet.append(header_cells)
+                # append() serialises immediately, so these cell objects can be
+                # reused rather than allocating millions of styled cells.
+                cells = [WriteOnlyCell(worksheet) for _ in headers]
+                for cell in cells[1:]:
+                    cell.number_format = "0.00"
+            if row_index % 512 == 0:
+                check_cancel()
+                if progress:
+                    progress(row_index, row_count)
+            for column_index, value in enumerate(row):
+                value = _cell_value(value)
+                cell = cells[column_index]
+                cell.value = value
+                # HDF5 labels/string values are data, never workbook formulae.
+                if isinstance(value, str):
+                    cell.data_type = "s"
+            worksheet.append(cells)
+        if worksheet is None:
+            worksheet = workbook.create_sheet("Data")
+            worksheet.append([meta_line])
+            worksheet.append(headers)
+        check_cancel()
+        workbook.save(output_path)
+        check_cancel()
+    finally:
+        # openpyxl creates temporary sheet XML files; release these even on cancellation.
+        for sheet in workbook.worksheets:
+            writer = getattr(sheet, "_writer", None)
+            if writer is not None:
+                if not sheet.closed:
+                    sheet.close()
+                try:
+                    writer.cleanup()
+                except FileNotFoundError:
+                    pass
+        workbook.close()
+
+
+def save_to_excel_with_meta(df, output_path: str, meta_line: str):
+    """Compatibility helper; write each row once without retaining Excel cells."""
+    _write_excel_rows(list(df.columns), df.itertuples(index=False, name=None), len(df), output_path, meta_line)
+
+
+def _normalise_output_name(name):
+    name = name.strip()
+    if not name or name in (".", "..") or re.search(r'[<>:"/\\|?*\x00-\x1f]', name) or name.endswith((".", " ")):
+        raise ValueError("导出名称必须是文件名，不能包含路径或 Windows 不允许的字符")
+    if len(name) > 180:
+        raise ValueError("导出文件名过长，请缩短至 180 个字符以内")
+    stem, extension = os.path.splitext(name)
+    if stem.upper().split(".")[0] in {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}:
+        raise ValueError("导出文件名是 Windows 保留名称，请更换名称")
+    if not extension:
+        return name + ".xlsx"
+    if extension.lower() not in (".xlsx", ".csv"):
+        raise ValueError("仅支持 .xlsx 或 .csv 导出格式")
+    return name
+
+
+def _validate_export_config(cfg):
+    if not cfg.selectedFields:
+        raise ValueError("请至少选择一个导出字段")
+    if len(cfg.selectedFields) > 16383:
+        raise ValueError("导出字段数量超过 Excel 列数限制")
+    if len(set(cfg.selectedFields)) != len(cfg.selectedFields):
+        raise ValueError("导出字段不能重复")
+    if not math.isfinite(cfg.interval) or cfg.interval <= 0:
+        raise ValueError("采样间隔必须是有限的正数")
+    if cfg.timeType and cfg.timeType not in TIME_TYPES:
+        raise ValueError("时间类型无效")
+    if (cfg.tempUnit or "degC") not in ("degC", "degF", "K", "°K"):
+        raise ValueError("温度单位无效")
+    if (cfg.presUnit or "PSI") not in ("PSI", "MPa", "kPa", "bar", "Pa"):
+        raise ValueError("压力单位无效")
+    if not os.path.isfile(cfg.filePath):
+        raise ValueError("HDF5 源文件不存在")
+    for bound in (cfg.startTimeStr, cfg.endTimeStr):
+        if bound:
+            try:
+                numeric = float(bound)
+            except ValueError:
+                _date_timestamp(bound)
+            else:
+                if not math.isfinite(numeric):
+                    raise ValueError("时间范围必须为有限值")
+    if cfg.baseDate:
+        _date_timestamp(cfg.baseDate)
+    return _normalise_output_name(cfg.customName)
+
+
+def _grid_row_count(start, end, interval):
+    if not all(math.isfinite(value) for value in (start, end, interval)) or interval <= 0:
+        raise ValueError("时间范围和采样间隔必须是有限值，间隔必须大于零")
+    if start > end:
+        raise ValueError("开始时间不能晚于结束时间")
+    # Validate before allocating even a single grid element.
+    ratio = (end - start) / interval
+    if not math.isfinite(ratio) or ratio >= MAX_EXPORT_ROWS:
+        raise ValueError(f"导出数据量过大，请缩短时间范围或增大间隔（最多 {MAX_EXPORT_ROWS:,} 行）")
+    row_count = int(math.floor(ratio + 1e-10)) + 1
+    if row_count > MAX_EXPORT_ROWS:
+        raise ValueError(f"导出数据量超过 {MAX_EXPORT_ROWS:,} 行")
+    datetime.datetime.fromtimestamp(start, datetime.timezone.utc)
+    datetime.datetime.fromtimestamp(end, datetime.timezone.utc)
+    return row_count
+
+
+def _bound_timestamp(value, fallback, time_type, base_date):
+    if not value:
+        return fallback
+    try:
+        numeric = float(value)
+    except ValueError:
+        return _date_timestamp(value)
+    if time_type == "relative_seconds":
+        return numeric + _date_timestamp(base_date or "1970-01-01 00:00:00")
+    if time_type == "timestamp_ms":
+        return numeric / 1000.0
+    return numeric
+
+
+def _format_timestamp(timestamp):
+    dt = datetime.datetime.fromtimestamp(float(timestamp), datetime.timezone.utc)
+    return f"{dt.year}/{dt.month}/{dt.day} {dt.hour}:{dt.minute:02d}:{dt.second:02d}"
+
+
+def _chunk_row_limit(field_count, axis_count):
+    """Budget aligned columns, retained match indices and nearest-match temporaries."""
+    bytes_per_row = 8 * (field_count + axis_count + 12)
+    return max(1, min(CHUNK_ROWS, MAX_CHUNK_MEMORY // bytes_per_row))
+
 
 def export_task_worker(task_id: str, cfg: ExportConfig, output_dir: str):
-    def update_status(progress: int, message: str, status: str = "running", error: str = None):
+    with tasks_lock:
+        cancel_event = _TASK_CANCEL.setdefault(task_id, threading.Event())
+
+    def check_cancel():
+        if cancel_event.is_set():
+            raise ExportCancelled()
+
+    def update_status(progress, message, status="running", error=None):
+        with tasks_lock:
+            task = TASKS.get(task_id)
+            if task and not cancel_event.is_set():
+                task.update(progress=progress, message=message, status=status, error=error)
+                if status in ("completed", "failed"):
+                    task["finished_at"] = time.time()
+
+    temp_path = None
+    try:
+        check_cancel()
+        output_name = _validate_export_config(cfg)
+        output_path = os.path.join(output_dir, output_name)
+        update_status(5, "正在读取 HDF5 结构...")
+        with h5py.File(cfg.filePath, "r") as file:
+            datasets = find_datasets(file)
+            global_time = cfg.timeField or detect_time_dataset(datasets)
+            paths = []
+            for field in cfg.selectedFields:
+                check_cancel()
+                base = field.split(":", 1)[0]
+                if base not in file or not isinstance(file[base], h5py.Dataset):
+                    raise ValueError(f"文件内未找到字段: {field}")
+                if _vector_size(file[base]) is None:
+                    raise ValueError(f"字段不是一维数据: {field}")
+                time_path = _time_path_for_field(file, field, cfg.timeField, global_time)
+                paths.append(time_path)
+            source_paths = {field.split(":", 1)[0] for field in cfg.selectedFields}
+            source_paths.update(path.split(":", 1)[0] for path in paths if path)
+            estimate = sum(file[path].size * file[path].dtype.itemsize for path in source_paths)
+            estimate += sum(file[path.split(":", 1)[0]].size * 32 for path in set(paths) if path)
+            if estimate > MAX_SOURCE_MEMORY:
+                raise ValueError("所选数据超过当前版本的内存预算，请减少字段或使用 64 位版本分批导出")
+            reader = _H5Reader(file, check_cancel)
+            axes = {}
+            field_data = []
+            min_times, max_times = [], []
+            headers = ["Date time"]
+            inferred_types = []
+            for index, (field, time_path) in enumerate(zip(cfg.selectedFields, paths)):
+                check_cancel()
+                update_status(10 + int(15 * index / len(paths)), f"正在读取字段 ({index + 1}/{len(paths)})...")
+                values = reader.read(field)
+                if values.dtype.kind not in "biuf":
+                    raise ValueError(f"导出字段必须是数值: {field}")
+                if time_path:
+                    if time_path not in axes:
+                        raw_times = reader.read(time_path)
+                        inferred_type = parse_time_array(raw_times)[0]
+                        # Explicit interpretation applies to the chosen global clock;
+                        # each embedded clock still retains its native seconds/ms format.
+                        chosen_type = cfg.timeType if cfg.timeType and time_path == global_time else inferred_type
+                        times = convert_time_array_to_float_timestamps(raw_times, chosen_type, cfg.baseDate)
+                        check_cancel()
+                        sorted_times, original_indices = _prepare_axis(times)
+                        axes[time_path] = (sorted_times, original_indices, chosen_type)
+                        if len(sorted_times):
+                            min_times.append(float(sorted_times[0]))
+                            max_times.append(float(sorted_times[-1]))
+                    axis = axes[time_path]
+                    if not len(axis[0]):
+                        raise ValueError(f"时间字段没有有效时间: {time_path}")
+                    inferred_types.append(axis[2])
+                else:
+                    raise ValueError(f"字段没有匹配的时间轴，请选择有效的时间字段: {field}")
+                header = get_column_header(file, field, cfg.tempUnit, cfg.presUnit)
+                if header in headers:
+                    header = f"{header} [{field}]"
+                headers.append(header)
+                _, _, conversion = determine_field_type_and_unit(file, field, cfg.tempUnit, cfg.presUnit)
+                field_data.append((values, time_path, conversion))
+            if not min_times:
+                raise ValueError("未找到有效时间轴")
+            bound_type = cfg.timeType or (inferred_types[0] if inferred_types else "timestamp_seconds")
+            start = _bound_timestamp(cfg.startTimeStr, min(min_times), bound_type, cfg.baseDate)
+            end = _bound_timestamp(cfg.endTimeStr, max(max_times), bound_type, cfg.baseDate)
+            row_count = _grid_row_count(start, end, cfg.interval)
+            update_status(30, f"开始流式写入 {row_count:,} 行...")
+            os.makedirs(output_dir, exist_ok=True)
+            descriptor, temp_path = tempfile.mkstemp(prefix=".hdf5-export-", suffix=os.path.splitext(output_name)[1], dir=output_dir)
+            os.close(descriptor)
+            well, serial, version = parse_filename_metadata(cfg.filePath)
+            meta = f"Well name:{well}, Sn :{serial} ,  Version :{version}"
+            chunk_rows = _chunk_row_limit(len(field_data), len(axes))
+
+            def rows():
+                for offset in range(0, row_count, chunk_rows):
+                    check_cancel()
+                    count = min(chunk_rows, row_count - offset)
+                    grid = start + (offset + np.arange(count, dtype=np.float64)) * cfg.interval
+                    matches = {}
+                    for path, (times, original_indices, _) in axes.items():
+                        indices = _nearest_sorted(times, grid)
+                        matches[path] = indices if original_indices is None else original_indices[indices]
+                    columns = [conversion(values[matches[path]]) for values, path, conversion in field_data]
+                    for row in range(count):
+                        yield (_format_timestamp(grid[row]), *(column[row] for column in columns))
+
+            def write_progress(done, total):
+                update_status(30 + int(65 * done / total), f"正在写入 {done:,}/{total:,} 行...")
+
+            if output_name.lower().endswith(".csv"):
+                with open(temp_path, "w", encoding="utf-8", newline="") as stream:
+                    stream.write(meta + "\n")
+                    writer = csv.writer(stream)
+                    writer.writerow(headers)
+                    for index, row in enumerate(rows()):
+                        if index % 512 == 0:
+                            check_cancel()
+                            write_progress(index, row_count)
+                        writer.writerow([row[0]] + [f"{float(value):.2f}" if math.isfinite(float(value)) else "" for value in row[1:]])
+            else:
+                _write_excel_rows(headers, rows(), row_count, temp_path, meta, check_cancel, write_progress)
+        check_cancel()
+        # Cancellation and publication use the same lock, eliminating the final-file race.
+        with tasks_lock:
+            check_cancel()
+            os.replace(temp_path, output_path)
+            temp_path = None
+            update_status(100, "导出成功！", "completed")
+    except ExportCancelled:
         with tasks_lock:
             if task_id in TASKS:
-                TASKS[task_id]["progress"] = progress
-                TASKS[task_id]["message"] = message
-                TASKS[task_id]["status"] = status
-                if error:
-                    TASKS[task_id]["error"] = error
-
-    update_status(5, "正在初始化导出任务...")
-    
-    try:
-        output_path = os.path.join(output_dir, cfg.customName)
-        is_csv = output_path.lower().endswith(".csv")
-        if not is_csv and not output_path.lower().endswith(".xlsx") and not output_path.lower().endswith(".xls"):
-            output_path += ".xlsx"
-            
-        update_status(10, "正在打开 HDF5 文件...")
-        
-        with h5py.File(cfg.filePath, "r") as f:
-            for field in cfg.selectedFields:
-                base_field = field.split(":", 1)[0] if ":" in field else field
-                if base_field not in f:
-                    raise ValueError(f"文件内未找到字段: {base_field}")
-            
-            update_status(15, "正在确定全局时间轴范围...")
-            min_times = []
-            max_times = []
-            
-            for field in cfg.selectedFields:
-                t_field_path, t_orig_raw = find_time_array_for_field(f, field)
-                if t_orig_raw is not None and len(t_orig_raw) > 0:
-                    t_type, _, _ = parse_time_array(t_orig_raw)
-                    t_orig = convert_time_array_to_float_timestamps(t_orig_raw, t_type, cfg.baseDate)
-                    t_orig_valid = t_orig[~np.isnan(t_orig)]
-                    if len(t_orig_valid) > 0:
-                        min_times.append(np.min(t_orig_valid))
-                        max_times.append(np.max(t_orig_valid))
-            
+                TASKS[task_id].update(status="cancelled", message="任务已取消", error=None, finished_at=time.time())
+    except Exception as error:
+        if cancel_event.is_set():
+            with tasks_lock:
+                if task_id in TASKS:
+                    TASKS[task_id].update(status="cancelled", message="任务已取消", error=None, finished_at=time.time())
+        else:
+            update_status(100, f"导出失败: {error}", "failed", str(error))
+    finally:
+        if temp_path and os.path.exists(temp_path):
             try:
-                start_ts = pd.to_datetime(cfg.startTimeStr).tz_localize('UTC').timestamp() if cfg.startTimeStr else (min(min_times) if min_times else 0.0)
-                end_ts = pd.to_datetime(cfg.endTimeStr).tz_localize('UTC').timestamp() if cfg.endTimeStr else (max(max_times) if max_times else 0.0)
-            except Exception:
-                raise ValueError("起止时间格式无效，应为 YYYY-MM-DD HH:MM:SS 或 YYYY/M/D")
-                
-            interval = cfg.interval if cfg.interval > 0 else 10.0
-            t_grid = np.arange(start_ts, end_ts + (interval / 2.0), interval)
-            
-            if len(t_grid) == 0:
-                raise ValueError("计算出的时间网格为空，请检查起止时间是否在数据范围内！")
-            if len(t_grid) > 2000000:
-                raise ValueError(f"导出数据量过大 ({len(t_grid)} 行)，请缩短时间范围或增大时间间隔！")
-                
-            update_status(25, "正在构建全局时间网格...")
-            t_grid_datetimes = []
-            for ts in t_grid:
-                dt = datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc)
-                t_grid_datetimes.append(f"{dt.year}/{dt.month}/{dt.day} {dt.hour}:{dt.minute:02d}:{dt.second:02d}")
-                
-            data_dict = {"Date time": t_grid_datetimes}
-            num_fields = len(cfg.selectedFields)
-            
-            for idx, field in enumerate(cfg.selectedFields):
-                col_title = get_column_header(f, field, cfg.tempUnit, cfg.presUnit)
-                update_status(
-                    int(30 + 50 * ((idx + 1) / max(num_fields, 1))),
-                    f"正在对齐并转换字段: {col_title} ({idx+1}/{num_fields})..."
-                )
-                
-                t_field_path, t_orig_raw = find_time_array_for_field(f, field)
-                val_arr = read_field_array(f, field)
-                
-                if t_orig_raw is not None and len(t_orig_raw) > 0:
-                    t_type, _, _ = parse_time_array(t_orig_raw)
-                    t_orig = convert_time_array_to_float_timestamps(t_orig_raw, t_type, cfg.baseDate)
-                    
-                    # Filter out NaN elements so alignment doesn't break
-                    valid_mask = ~np.isnan(t_orig)
-                    t_orig_clean = t_orig[valid_mask]
-                    val_arr_clean = val_arr[valid_mask]
-                    
-                    if len(t_orig_clean) > 0:
-                        nearest_indices = find_nearest_indices(t_orig_clean, t_grid)
-                        v_aligned = val_arr_clean[nearest_indices]
-                    else:
-                        v_aligned = np.full(len(t_grid), np.nan)
-                else:
-                    if len(val_arr) == len(t_grid):
-                        v_aligned = val_arr
-                    else:
-                        v_aligned = np.full(len(t_grid), np.nan)
-                        
-                _, _, convert_func = determine_field_type_and_unit(f, field, cfg.tempUnit, cfg.presUnit)
-                v_final = convert_func(v_aligned)
-                data_dict[col_title] = v_final
-                
-            update_status(85, "正在整理对齐后的数据表...")
-            df = pd.DataFrame(data_dict)
-            
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            well, sn, version = parse_filename_metadata(cfg.filePath)
-            meta_line = f"Well name:{well}, Sn :{sn} ,  Version :{version}"
-            
-            if is_csv:
-                update_status(90, f"正在将单表数据写入 CSV 文件: {os.path.basename(output_path)}...")
-                with open(output_path, "w", encoding="utf-8") as csv_file:
-                    csv_file.write(meta_line + "\n")
-                    df.to_csv(csv_file, index=False, float_format="%.2f")
-            else:
-                update_status(90, f"正在将单表数据写入 Excel 文件: {os.path.basename(output_path)}...")
-                save_to_excel_with_meta(df, output_path, meta_line)
-                
-            update_status(100, "导出成功！", status="completed")
-            
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        update_status(100, f"导出失败: {str(e)}", status="failed", error=str(e))
+                os.unlink(temp_path)
+            except OSError:
+                pass
 
-# ----------------------------------------------------------------
-# API 路由
-# ----------------------------------------------------------------
 
 @app.post("/api/scan")
 def scan_directory(payload: ScanPayload):
-    """扫描目录下的顶级 H5 文件"""
-    path = payload.path.strip()
+    path = os.path.abspath(os.path.expanduser(payload.path.strip()))
     if not os.path.exists(path):
         raise HTTPException(status_code=400, detail="指定的路径不存在，请检查后重新输入。")
-        
     if os.path.isfile(path):
         if path.lower().endswith((".h5", ".hdf5")):
-            return {"files": [{
-                "path": path,
-                "name": os.path.basename(path),
-                "size": os.path.getsize(path)
-            }]}
+            return {"files": [{"path": path, "name": os.path.basename(path), "size": os.path.getsize(path)}]}
         raise HTTPException(status_code=400, detail="输入的文件不是有效的 HDF5 文件。")
-        
     try:
-        files = []
-        for entry in os.scandir(path):
-            if entry.is_file() and entry.name.lower().endswith((".h5", ".hdf5")):
-                files.append({
-                    "path": entry.path,
-                    "name": entry.name,
-                    "size": entry.stat().st_size
-                })
-        files.sort(key=lambda x: x["name"])
-        return {"files": files}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"扫描文件夹失败: {str(e)}")
+        with os.scandir(path) as entries:
+            files = [{"path": entry.path, "name": entry.name, "size": entry.stat().st_size}
+                     for entry in entries if entry.is_file() and entry.name.lower().endswith((".h5", ".hdf5"))]
+        return {"files": sorted(files, key=lambda entry: entry["name"])}
+    except OSError as error:
+        raise HTTPException(status_code=500, detail=f"扫描文件夹失败: {error}")
+
 
 @app.post("/api/browse")
 def browse_directory():
@@ -739,198 +826,228 @@ def browse_directory():
         return {"path": "", "error": error_msg}
     return {"path": ""}
 
+
+
+def _read_vector_slice(ds, member, start, stop):
+    if len(ds.shape) == 1:
+        selection = (slice(start, stop),)
+    elif ds.shape[0] == 1:
+        selection = (0, slice(start, stop))
+    else:
+        selection = (slice(start, stop), 0)
+    # Combined slice/member indexing works on both h5py 2.10 (Windows x86)
+    # and current h5py, and reads only this chunk of the requested member.
+    return ds[selection + ((member,) if member else ())].reshape(-1)
+
+
+def _inspect_time(file, field):
+    """Read time in bounded chunks; never read measurement datasets to inspect them."""
+    path, _, member = field.partition(":")
+    ds = file[path]
+    if not isinstance(ds, h5py.Dataset) or _vector_size(ds) is None:
+        raise ValueError("时间字段不是一维数据")
+    count = _vector_size(ds)
+    sample = _read_vector_slice(ds, member, 0, min(count, 64))
+    time_type = parse_time_array(sample)[0]
+    low, high = None, None
+    for start in range(0, count, 65536):
+        raw = _read_vector_slice(ds, member, start, min(count, start + 65536))
+        if time_type in ("string", "unknown_string"):
+            values = convert_time_array_to_float_timestamps(raw, time_type, None)
+        else:
+            values = np.asarray(raw, dtype=np.float64)
+        valid = values[np.isfinite(values)]
+        if not len(valid):
+            continue
+        current_low, current_high = float(np.min(valid)), float(np.max(valid))
+        low = current_low if low is None else min(low, current_low)
+        high = current_high if high is None else max(high, current_high)
+    if low is None:
+        return time_type, None, None
+    if time_type not in ("string", "unknown_string"):
+        time_type = parse_time_array(np.array([low, high]))[0]
+    if time_type == "relative_seconds":
+        return time_type, str(low), str(high)
+    if time_type == "timestamp_ms":
+        low, high = low / 1000, high / 1000
+    formatter = lambda value: datetime.datetime.fromtimestamp(value, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    return time_type, formatter(low), formatter(high)
+
+
 @app.post("/api/inspect")
 def inspect_hdf5(payload: InspectPayload):
-    """提取单个 H5 文件的结构、时间列和起止范围"""
-    path = payload.path.strip()
-    if not os.path.exists(path):
+    path = os.path.abspath(os.path.expanduser(payload.path.strip()))
+    if not os.path.isfile(path):
         raise HTTPException(status_code=400, detail="文件不存在")
-        
     try:
-        with h5py.File(path, "r") as f:
-            datasets = find_datasets(f)
-            if not datasets:
-                return {
-                    "datasets": [],
-                    "detectedTimeField": None,
-                    "timeType": "none",
-                    "timeMinStr": None,
-                    "timeMaxStr": None
-                }
-                
-            detected_time = detect_time_dataset(datasets)
-            time_type = "none"
-            time_min_str = None
-            time_max_str = None
-            
-            if detected_time:
-                if ":" in detected_time:
-                    ds_path, sub_field = detected_time.split(":", 1)
-                    t_ds = f[ds_path]
-                    t_arr = t_ds[sub_field][:]
-                else:
-                    t_ds = f[detected_time]
-                    t_arr = t_ds[:]
-                
-                if len(t_arr.shape) == 2:
-                    t_arr = t_arr[0, :] if t_arr.shape[0] == 1 else t_arr[:, 0]
-                
-                t_type, min_ts, max_ts = parse_time_array(t_arr)
-                time_type = t_type
-                
-                if t_type == "timestamp_seconds" and min_ts is not None:
-                    time_min_str = datetime.datetime.fromtimestamp(min_ts, tz=datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-                    time_max_str = datetime.datetime.fromtimestamp(max_ts, tz=datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-                elif t_type == "timestamp_ms" and min_ts is not None:
-                    time_min_str = datetime.datetime.fromtimestamp(min_ts/1000.0, tz=datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-                    time_max_str = datetime.datetime.fromtimestamp(max_ts/1000.0, tz=datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-                elif t_type == "relative_seconds" and min_ts is not None:
-                    time_min_str = str(min_ts)
-                    time_max_str = str(max_ts)
-                elif t_type == "string":
-                    try:
-                        time_min_str = t_arr[0].decode('utf-8') if isinstance(t_arr[0], bytes) else str(t_arr[0])
-                        time_max_str = t_arr[-1].decode('utf-8') if isinstance(t_arr[-1], bytes) else str(t_arr[-1])
-                    except Exception:
-                        pass
-            
-            return {
-                "datasets": datasets,
-                "detectedTimeField": detected_time,
-                "timeType": time_type,
-                "timeMinStr": time_min_str,
-                "timeMaxStr": time_max_str
-            }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"解析 HDF5 文件失败: {str(e)}")
+        with h5py.File(path, "r") as file:
+            datasets = find_datasets(file)
+            detected = detect_time_dataset(datasets)
+            time_type, low, high = _inspect_time(file, detected) if detected else ("none", None, None)
+            time_fields = []
+            for entry in datasets:
+                if entry.get("timeField"):
+                    time_fields.append(entry["timeField"])
+                elif is_time_field(entry["path"]):
+                    time_fields.append(entry["path"])
+            return {"datasets": datasets, "detectedTimeField": detected, "timeFields": time_fields,
+                    "timeType": time_type, "timeMinStr": low, "timeMaxStr": high}
+    except Exception as error:
+        raise HTTPException(status_code=400, detail=f"解析 HDF5 文件失败: {error}")
+
+
+def _prune_tasks():
+    terminal = [(task_id, task.get("finished_at", 0)) for task_id, task in TASKS.items()
+                if task["status"] in ("completed", "failed", "cancelled")]
+    terminal.sort(key=lambda item: item[1], reverse=True)
+    for task_id, finished_at in terminal[MAX_TASK_HISTORY:]:
+        future = _TASK_FUTURES.get(task_id)
+        if future is not None and not future.done():
+            continue
+        TASKS.pop(task_id, None)
+        _TASK_CANCEL.pop(task_id, None)
+        _TASK_FUTURES.pop(task_id, None)
+
 
 @app.post("/api/export")
 def trigger_export(payload: ExportPayload):
-    """接收导出任务并异步执行"""
     if not payload.configs:
         raise HTTPException(status_code=400, detail="没有提交任何导出配置")
-        
-    output_dir = payload.outputDir.strip()
+    if len(payload.configs) > MAX_ACTIVE_TASKS:
+        raise HTTPException(status_code=400, detail=f"每批最多提交 {MAX_ACTIVE_TASKS} 个文件")
+    output_dir = os.path.expanduser(payload.outputDir.strip())
     if not output_dir:
         raise HTTPException(status_code=400, detail="未指定导出保存的目录")
-        
+    output_dir = os.path.abspath(output_dir)
     try:
+        names = [_validate_export_config(cfg) for cfg in payload.configs]
+        keys = [os.path.join(output_dir, name).casefold() for name in names]
+        if len(set(keys)) != len(keys):
+            raise ValueError("同一批次的导出文件名不能重复（Windows 不区分大小写）")
         os.makedirs(output_dir, exist_ok=True)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"无法创建导出目标目录: {str(e)}")
-        
-    task_ids = []
+    except (ValueError, OSError, OverflowError) as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    ids = []
     with tasks_lock:
-        for cfg in payload.configs:
+        _prune_tasks()
+        active = [task for task in TASKS.values() if task["status"] in ("pending", "running")]
+        if len(active) + len(payload.configs) > MAX_ACTIVE_TASKS:
+            raise HTTPException(status_code=400, detail="排队任务过多，请等待当前任务完成")
+        if any(task["output_path"].casefold() in keys for task in active):
+            raise HTTPException(status_code=400, detail="同名文件正在导出，请等待完成或更换文件名")
+        for cfg, name in zip(payload.configs, names):
             task_id = str(uuid.uuid4())
-            TASKS[task_id] = {
-                "file_name": os.path.basename(cfg.filePath),
-                "status": "pending",
-                "progress": 0,
-                "message": "排队等待中...",
-                "error": None,
-                "output_path": os.path.join(output_dir, cfg.customName)
-            }
-            task_ids.append(task_id)
-            executor.submit(export_task_worker, task_id, cfg, output_dir)
-            
-    return {"taskIds": task_ids}
+            TASKS[task_id] = {"file_name": os.path.basename(cfg.filePath), "status": "pending", "progress": 0,
+                              "message": "排队等待中...", "error": None, "output_path": os.path.join(output_dir, name)}
+            _TASK_CANCEL[task_id] = threading.Event()
+            ids.append(task_id)
+            _TASK_FUTURES[task_id] = executor.submit(export_task_worker, task_id, cfg, output_dir)
+    return {"taskIds": ids}
+
 
 @app.get("/api/status")
 def get_status(taskIds: str):
-    """查询导出任务进度"""
-    ids = taskIds.split(",")
-    results = {}
     with tasks_lock:
-        for t_id in ids:
-            if t_id in TASKS:
-                results[t_id] = TASKS[t_id]
-            else:
-                results[t_id] = {
-                    "status": "failed",
-                    "progress": 100,
-                    "message": "未找到任务",
-                    "error": "Task not found"
-                }
-    return results
+        return {task_id: dict(TASKS.get(task_id, {"status": "failed", "progress": 100,
+                "message": "未找到任务", "error": "Task not found"})) for task_id in taskIds.split(",")}
+
 
 @app.post("/api/cancel")
 def cancel_task(taskId: str):
-    """取消任务"""
     with tasks_lock:
-        if taskId in TASKS:
-            if TASKS[taskId]["status"] in ["pending", "running"]:
-                TASKS[taskId]["status"] = "failed"
-                TASKS[taskId]["message"] = "任务已被用户取消"
-                TASKS[taskId]["error"] = "Cancelled by user"
-                return {"success": True}
+        task = TASKS.get(taskId)
+        if task and task["status"] in ("pending", "running"):
+            _TASK_CANCEL[taskId].set()
+            future = _TASK_FUTURES.get(taskId)
+            if future:
+                future.cancel()
+            task.update(status="cancelled", message="任务已取消", error=None, finished_at=time.time())
+            return {"success": True}
     return {"success": False, "detail": "任务已完成或不存在"}
 
-# ----------------------------------------------------------------
-# 本地持久化配置管理 (解决不同端口下 localStorage 丢失的问题)
-# ----------------------------------------------------------------
-import json
 
 CONFIG_FILE = os.path.join(app_dir, "config.json")
-BUNDLED_CONFIG_FILE = os.path.join(base_dir, "config.json")
+BUNDLED_CONFIG_FILE = os.path.join(base_dir, "config.default.json")
+if sys.platform == "win32":
+    _settings_root = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Local")
+elif sys.platform == "darwin":
+    _settings_root = os.path.join(os.path.expanduser("~"), "Library", "Application Support")
+else:
+    _settings_root = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+FALLBACK_CONFIG_FILE = os.path.join(_settings_root, "H5ToExcelConverter", "config.json")
+_config_lock = threading.RLock()
 
-def read_local_config():
-    # 1. 优先读取可执行文件同级目录下的 config.json
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"读取本地配置文件失败 ({CONFIG_FILE}): {e}")
 
-    # 2. 若同级目录不存在，尝试从内置打包资源中读取默认模板
-    if os.path.exists(BUNDLED_CONFIG_FILE):
-        try:
-            with open(BUNDLED_CONFIG_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                # 自动将内置模板写一份到 exe 同级目录，方便用户直接查看和修改
-                try:
-                    write_local_config(data)
-                except Exception:
-                    pass
-                return data
-        except Exception as e:
-            print(f"读取内置配置文件失败 ({BUNDLED_CONFIG_FILE}): {e}")
-
+def _default_config():
     return {"h5_src_path": "", "h5_out_path": "", "h5_field_presets": {}}
 
+
+def read_local_config():
+    with _config_lock:
+        candidates = [path for path in dict.fromkeys((CONFIG_FILE, FALLBACK_CONFIG_FILE)) if os.path.isfile(path)]
+        candidates.sort(key=lambda path: os.path.getmtime(path), reverse=True)
+        if os.path.isfile(BUNDLED_CONFIG_FILE):
+            candidates.append(BUNDLED_CONFIG_FILE)
+        for path in candidates:
+            try:
+                with open(path, encoding="utf-8") as source:
+                    config = json.load(source)
+                if isinstance(config, dict):
+                    return config
+            except (OSError, ValueError):
+                continue
+        return _default_config()
+
+
 def write_local_config(config_data):
-    try:
-        os.makedirs(os.path.dirname(os.path.abspath(CONFIG_FILE)), exist_ok=True)
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(config_data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"写入本地配置文件失败 ({CONFIG_FILE}): {e}")
+    encoded = json.dumps(config_data, ensure_ascii=False, indent=2)
+    errors = []
+    with _config_lock:
+        for path in dict.fromkeys((CONFIG_FILE, FALLBACK_CONFIG_FILE)):
+            temporary = None
+            try:
+                folder = os.path.dirname(os.path.abspath(path))
+                os.makedirs(folder, exist_ok=True)
+                descriptor, temporary = tempfile.mkstemp(prefix=".config-", suffix=".json", dir=folder)
+                with os.fdopen(descriptor, "w", encoding="utf-8") as target:
+                    target.write(encoded)
+                    target.flush()
+                    os.fsync(target.fileno())
+                os.replace(temporary, path)
+                return path
+            except OSError as error:
+                errors.append(str(error))
+            finally:
+                if temporary and os.path.exists(temporary):
+                    os.unlink(temporary)
+    raise OSError("无法保存配置: " + "; ".join(errors))
+
 
 @app.get("/api/config")
 def get_config():
-    """获取本地配置文件内容"""
     return read_local_config()
+
 
 @app.post("/api/config")
 def save_config(payload: dict):
-    """保存/更新本地配置文件内容"""
-    current_config = read_local_config()
-    for k, v in payload.items():
-        current_config[k] = v
-    write_local_config(current_config)
-    return {"status": "ok"}
+    try:
+        with _config_lock:
+            current = read_local_config()
+            current.update(payload)
+            path = write_local_config(current)
+        return {"status": "ok", "configPath": path}
+    except (OSError, TypeError, ValueError) as error:
+        raise HTTPException(status_code=500, detail=str(error))
 
 
 @app.get("/")
 def read_root():
-    static_index = os.path.join(base_dir, "static", "index.html")
-    if os.path.exists(static_index):
-        return FileResponse(static_index)
+    index = os.path.join(base_dir, "static", "index.html")
+    if os.path.exists(index):
+        return FileResponse(index)
     return JSONResponse(status_code=404, content={"message": "Frontend static file index.html not found."})
 
+
 static_path = os.path.join(base_dir, "static")
-if not os.path.exists(static_path):
-    os.makedirs(static_path, exist_ok=True)
-    
-app.mount("/static", StaticFiles(directory=static_path), name="static")
+if os.path.isdir(static_path):
+    app.mount("/static", StaticFiles(directory=static_path), name="static")

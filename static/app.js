@@ -1061,12 +1061,12 @@ function startPolling(taskIds) {
                     }
                     // 从轮询列表中移除该任务
                     state.activeTasks = state.activeTasks.filter(id => id !== taskId);
-                } else if (info.status === "failed") {
+                } else if (info.status === "failed" || info.status === "cancelled") {
                     if (bar) {
                         bar.classList.add("failed");
                         bar.style.width = "100%";
                     }
-                    if (pct) pct.innerText = "❌ 失败";
+                    if (pct) pct.innerText = info.status === "cancelled" ? "已取消" : "❌ 失败";
                     if (msg) msg.innerText = info.message;
                     // 从轮询列表中移除该任务
                     state.activeTasks = state.activeTasks.filter(id => id !== taskId);

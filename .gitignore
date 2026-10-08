@@ -54,6 +54,10 @@ pipfile.lock
 
 # macOS system files
 .DS_Store
+config.json
+*.spec
+test-reports/
+artifacts/
 
 # Large production data and output files
 生产环境h5文件/
