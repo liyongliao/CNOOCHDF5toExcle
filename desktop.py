@@ -154,29 +154,29 @@ class DesktopApp:
         style.configure("TLabelframe", background="#f3f5f8", bordercolor="#d8e0ea")
         style.configure("TLabelframe.Label", background="#f3f5f8", foreground="#243247",
                         font=(font_family, font_size, "bold"))
-        style.configure("TButton", padding=(12, 7))
+        style.configure("TButton", padding=(10, 5))
         style.configure("Primary.TButton", background="#2563eb", foreground="white",
-                        padding=(22, 9), font=(font_family, font_size, "bold"))
+                        padding=(20, 6), font=(font_family, font_size, "bold"))
         style.map("Primary.TButton", background=[("disabled", "#b1bdd0"), ("active", "#1d4ed8")],
                   foreground=[("disabled", "#f5f7fb")])
         style.configure("Treeview", rowheight=31, font=(font_family, font_size),
                         fieldbackground="white", background="white", foreground="#243247")
-        style.configure("Treeview.Heading", font=(font_family, font_size, "bold"), padding=(5, 8))
+        style.configure("Treeview.Heading", font=(font_family, font_size, "bold"), padding=(5, 5))
         style.map("Treeview", background=[("selected", "#dceaff")],
                   foreground=[("selected", "#153d73")])
         style.configure("TProgressbar", background="#2563eb", troughcolor="#dfe6ef")
 
-        outer = ttk.Frame(root, padding=(24, 20, 24, 16))
+        outer = ttk.Frame(root, padding=(16, 12, 16, 10))
         outer.pack(fill="both", expand=True)
         outer.columnconfigure(0, weight=1)
         outer.rowconfigure(2, weight=1)
         header = ttk.Frame(outer)
-        header.grid(row=0, column=0, sticky="ew", pady=(0, 16))
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         ttk.Label(header, text="井下压力数据导出", style="Title.TLabel").pack(side="left")
-        ttk.Label(header, text="HDF5  →  Excel / CSV", style="Muted.TLabel").pack(side="right", pady=(12, 0))
+        ttk.Label(header, text="HDF5  →  Excel / CSV", style="Muted.TLabel").pack(side="right", pady=(6, 0))
 
-        source = ttk.LabelFrame(outer, text="1  选择数据", padding=12)
-        source.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        source = ttk.LabelFrame(outer, text="1  选择数据", padding=8)
+        source.grid(row=1, column=0, sticky="ew", pady=(0, 8))
         source.columnconfigure(0, weight=1)
         self.source_entry = ttk.Entry(source, textvariable=self.source)
         self.source_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
@@ -188,12 +188,14 @@ class DesktopApp:
         self.scan_button = ttk.Button(source, text="刷新", command=self.scan_source)
         self.scan_button.grid(row=0, column=3)
 
-        file_frame = ttk.LabelFrame(outer, text="2  勾选文件", padding=12)
-        file_frame.grid(row=2, column=0, sticky="nsew", pady=(0, 12))
+        file_frame = ttk.LabelFrame(outer, text="2  勾选文件", padding=8)
+        file_frame.grid(row=2, column=0, sticky="nsew", pady=(0, 8))
         file_frame.columnconfigure(0, weight=1)
-        file_frame.rowconfigure(1, weight=1)
+        # Preserve a useful viewport even on a 1024 x 768 desktop. The empty
+        # results log must never push this table down to its heading alone.
+        file_frame.rowconfigure(1, weight=1, minsize=140)
         toolbar = ttk.Frame(file_frame)
-        toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         ttk.Button(toolbar, text="全部勾选", command=lambda: self.choose_all(True)).pack(side="left")
         ttk.Button(toolbar, text="全部清空", command=lambda: self.choose_all(False)).pack(side="left", padx=6)
         self.configure_button = ttk.Button(toolbar, text="字段 / 时间设置", command=self.configure_file)
@@ -202,7 +204,7 @@ class DesktopApp:
         table = ttk.Frame(file_frame)
         table.grid(row=1, column=0, sticky="nsew")
         table.columnconfigure(0, weight=1)
-        table.rowconfigure(0, weight=1)
+        table.rowconfigure(0, weight=1, minsize=140)
         self.tree = ttk.Treeview(table, columns=("choose", "name", "size", "fields", "state"),
                                  show="headings", selectmode="extended", height=7)
         columns = [("choose", "勾选", 48, False), ("name", "文件名", 295, True),
@@ -221,17 +223,17 @@ class DesktopApp:
         self.tree.bind("<Double-1>", self._tree_double_click)
         self.tree.bind("<<TreeviewSelect>>", self._file_focus_changed)
         pagination = ttk.Frame(file_frame)
-        pagination.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        pagination.grid(row=2, column=0, sticky="ew", pady=(4, 0))
         ttk.Label(pagination, textvariable=self.page_info, style="Muted.TLabel").pack(side="left")
         self.next_button = ttk.Button(pagination, text="下一页", command=lambda: self.change_page(1))
         self.next_button.pack(side="right")
         self.prev_button = ttk.Button(pagination, text="上一页", command=lambda: self.change_page(-1))
         self.prev_button.pack(side="right", padx=6)
         ttk.Label(file_frame, textvariable=self.detail, style="Muted.TLabel", wraplength=930).grid(
-            row=3, column=0, sticky="ew", pady=(8, 0))
+            row=3, column=0, sticky="ew", pady=(4, 0))
 
-        output = ttk.LabelFrame(outer, text="3  保存与导出", padding=12)
-        output.grid(row=3, column=0, sticky="ew", pady=(0, 12))
+        output = ttk.LabelFrame(outer, text="3  保存与导出", padding=8)
+        output.grid(row=3, column=0, sticky="ew", pady=(0, 8))
         output.columnconfigure(0, weight=1)
         self.output_entry = ttk.Entry(output, textvariable=self.output)
         self.output_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
@@ -243,13 +245,13 @@ class DesktopApp:
         self.format_combo.grid(row=0, column=2)
         self.format_combo.bind("<<ComboboxSelected>>", lambda _event: self._settings_changed())
         options = ttk.Frame(output)
-        options.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        options.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(6, 0))
         self.advanced_button = ttk.Button(options, text="▸  采样与单位", command=self.toggle_advanced)
         self.advanced_button.pack(side="left")
         self.settings_summary = tk.StringVar(value="每 10 秒取样 · 温度 °C · 压力 PSI")
         ttk.Label(options, textvariable=self.settings_summary, style="Muted.TLabel").pack(side="left", padx=12)
         self.advanced = ttk.Frame(output)
-        self.advanced.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+        self.advanced.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(6, 0))
         ttk.Label(self.advanced, text="采样间隔（秒）").grid(row=0, column=0, padx=(0, 8))
         self.interval_entry = ttk.Entry(self.advanced, textvariable=self.interval, width=9)
         self.interval_entry.grid(row=0, column=1, padx=(0, 20))
@@ -262,7 +264,7 @@ class DesktopApp:
                                       values=list(PRESSURE_UNITS), state="readonly", width=9)
         self.pres_combo.grid(row=0, column=5)
         ttk.Label(self.advanced, text="时间范围和个别文件的配置可在“字段 / 时间设置”中调整。",
-                  style="Muted.TLabel").grid(row=1, column=0, columnspan=6, sticky="w", pady=(8, 0))
+                  style="Muted.TLabel").grid(row=1, column=0, columnspan=6, sticky="w", pady=(4, 0))
         self.advanced.grid_remove()
         for variable in (self.interval, self.temperature, self.pressure):
             variable.trace_add("write", lambda *_args: self._settings_changed())
@@ -271,7 +273,7 @@ class DesktopApp:
         footer.grid(row=4, column=0, sticky="ew")
         footer.columnconfigure(0, weight=1)
         actions = ttk.Frame(footer)
-        actions.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        actions.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         ttk.Label(actions, textvariable=self.status, wraplength=570).pack(side="left")
         self.export_button = ttk.Button(actions, text="开始导出", style="Primary.TButton", command=self.start_export)
         self.export_button.pack(side="right")
@@ -281,9 +283,10 @@ class DesktopApp:
         self.open_button.pack(side="right")
         self.progress = ttk.Progressbar(footer, maximum=100, mode="determinate")
         self.progress.grid(row=1, column=0, sticky="ew")
-        self.log = tk.Text(footer, height=3, borderwidth=0, highlightthickness=0,
+        self.log = tk.Text(footer, height=1, borderwidth=0, highlightthickness=0,
                            background="#f3f5f8", foreground="#68788d", wrap="word", state="disabled")
-        self.log.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        self.log.grid(row=2, column=0, sticky="ew", pady=(4, 0))
+        self.log.grid_remove()
         self._update_controls()
 
     def _first_paint(self):
@@ -472,6 +475,7 @@ class DesktopApp:
                 self._log(detail)
 
     def _log(self, text):
+        self.log.grid()
         self.log.configure(state="normal")
         self.log.insert("end", text + "\n")
         # Keep a bounded log even when processing thousands of files.
