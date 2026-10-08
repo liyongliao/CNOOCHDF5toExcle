@@ -7,10 +7,12 @@ import types
 import unittest
 from unittest.mock import patch
 
+UI_IMPORT_ERROR = None
 try:
     import tkinter as tk
     import desktop
-except ImportError:
+except ImportError as exc:
+    UI_IMPORT_ERROR = str(exc)
     tk = None
     desktop = None
 
@@ -65,7 +67,7 @@ class FakeBackend:
         return {"success": True}
 
 
-@unittest.skipIf(tk is None, "Python was installed without tkinter")
+@unittest.skipIf(desktop is None, "Modern desktop UI dependencies are unavailable: %s" % UI_IMPORT_ERROR)
 class DesktopTests(unittest.TestCase):
     def setUp(self):
         try:
@@ -92,6 +94,11 @@ class DesktopTests(unittest.TestCase):
 
     def tearDown(self):
         self.ui.closed = True
+        # Cancel the Tcl schedule before destroying widgets. Calling the raw
+        # cancellation command leaves each widget to delete its own registered
+        # callbacks, avoiding both stale timers and duplicate command deletion.
+        for callback in self.root.tk.splitlist(self.root.tk.call("after", "info")):
+            self.root.tk.call("after", "cancel", callback)
         self.root.destroy()
         self.error_dialog.stop()
         self.loader.stop()

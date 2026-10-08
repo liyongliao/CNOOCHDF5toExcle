@@ -1,4 +1,4 @@
-"""Native desktop front end; keep imports here limited to the standard library.
+"""Modern, lightweight desktop front end.
 
 The window is painted before importing the HDF5/export engine. All filesystem,
 inspection, configuration and export calls run away from Tk's event thread.
@@ -20,6 +20,8 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Optional
 
+import customtkinter as ctk
+
 
 PAGE_SIZE = 100
 FIELD_PAGE_SIZE = 200
@@ -33,6 +35,66 @@ TIME_TYPES = {
 }
 TEMPERATURE_UNITS = {"°C 摄氏度": "degC", "°F 华氏度": "degF", "K 开尔文": "K"}
 PRESSURE_UNITS = {"PSI": "PSI", "Pa": "Pa", "kPa": "kPa", "bar": "bar", "MPa": "MPa"}
+
+
+class Interface:
+    """Shared small controls; no image assets or browser runtime are needed."""
+
+    background = "#F3F6FA"
+    surface = "#FFFFFF"
+    ink = "#172B46"
+    muted = "#75849A"
+    accent = "#2864E8"
+    soft = "#EDF3FF"
+    line = "#E4EAF2"
+
+    def __init__(self):
+        self.family = "Microsoft YaHei UI" if sys.platform == "win32" else "PingFang SC" if sys.platform == "darwin" else "sans-serif"
+        self.font = (self.family, 13)
+        self.small = (self.family, 12)
+        self.heading = (self.family, 15, "bold")
+
+    def frame(self, parent, *, card=False, **options):
+        return ctk.CTkFrame(parent, fg_color=self.surface if card else "transparent",
+                            corner_radius=12 if card else 0,
+                            border_width=1 if card else 0, border_color=self.line, **options)
+
+    def label(self, parent, *, text="", muted=False, font=None, **options):
+        options.setdefault("text_color", self.muted if muted else self.ink)
+        options.setdefault("anchor", "w")
+        selected_font = font or self.font
+        options.setdefault("height", max(20, selected_font[1] + 5))
+        return ctk.CTkLabel(parent, text=text, font=selected_font, **options)
+
+    def button(self, parent, text, command, *, primary=False, quiet=False, width=100, height=34, **options):
+        return ctk.CTkButton(parent, text=text, command=command, width=width, height=height,
+                             corner_radius=8, border_width=0,
+                             font=(self.family, 13, "bold") if primary else self.font,
+                             fg_color=self.accent if primary else self.surface if quiet else self.soft,
+                             hover_color="#1D51CA" if primary else "#E2EBFF",
+                             text_color="#FFFFFF" if primary else self.accent,
+                             text_color_disabled="#A0AEC1", **options)
+
+    def entry(self, parent, variable, *, width=160, **options):
+        return ctk.CTkEntry(parent, textvariable=variable, width=width, height=34,
+                            corner_radius=8, border_width=1, border_color=self.line,
+                            fg_color="#FBFCFE", text_color=self.ink,
+                            placeholder_text_color=self.muted, font=self.font, **options)
+
+    def combo(self, parent, variable, values, *, width=170, command=None):
+        return ctk.CTkComboBox(parent, variable=variable, values=list(values), state="readonly",
+                               command=command, width=width, height=34, corner_radius=8,
+                               border_width=1, border_color=self.line, fg_color="#FBFCFE",
+                               button_color=self.soft, button_hover_color="#E2EBFF",
+                               dropdown_fg_color=self.surface, dropdown_hover_color=self.soft,
+                               dropdown_text_color=self.ink, text_color=self.ink,
+                               text_color_disabled="#A0AEC1", font=self.font, dropdown_font=self.font)
+
+    def step(self, parent, number, title):
+        self.label(parent, text=str(number), font=(self.family, 12, "bold"),
+                   fg_color=self.soft, corner_radius=7, width=24,
+                   anchor="center", text_color=self.accent).pack(side="left")
+        self.label(parent, text=title, font=self.heading).pack(side="left", padx=(8, 0))
 
 
 def default_fields(datasets: list[dict], time_field: Optional[str]) -> list[str]:
@@ -78,6 +140,27 @@ def error_text(exc: Exception) -> str:
 
 def _label_for(options: dict[str, str], value: str, default: str) -> str:
     return next((label for label, code in options.items() if code == value), default)
+
+
+def _window_scale(window) -> float:
+    """Tk reports physical screen pixels; CTk geometry uses logical pixels."""
+    getter = getattr(window, "_get_window_scaling", None)
+    return float(getter()) if getter else 1.0
+
+
+def _fit_display(root) -> tuple[int, int]:
+    available_width = max(1, root.winfo_screenwidth() - 80)
+    available_height = max(1, root.winfo_screenheight() - 96)
+    if isinstance(root, ctk.CTk):
+        detected_scale = _window_scale(root) / ctk.ScalingTracker.window_scaling
+        # A 1366 x 768 monitor at 150% cannot fit the minimum layout at the
+        # full OS multiplier. Keep window and controls at the same fitted scale.
+        fitted_scale = min(detected_scale, available_width / 860, available_height / 620)
+        factor = fitted_scale / detected_scale
+        ctk.set_widget_scaling(factor)
+        ctk.set_window_scaling(factor)
+    scale = _window_scale(root)
+    return int(available_width / scale), int(available_height / scale)
 
 
 class DesktopApp:
@@ -131,160 +214,176 @@ class DesktopApp:
 
     def _build_window(self):
         root = self.root
+        ctk.set_appearance_mode("light")
+        self.design = ui = Interface()
         root.title("井下压力 · 数据导出")
-        width = min(1040, max(860, root.winfo_screenwidth() - 80))
-        height = min(780, max(620, root.winfo_screenheight() - 96))
+        available_width, available_height = _fit_display(root)
+        width = min(1040, max(860, available_width))
+        height = min(780, max(620, available_height))
+        # CTk temporarily clamps a window to its previous size when changing
+        # scale. Restore the fitted bounds before setting the first geometry.
+        root.maxsize(available_width, available_height)
         root.geometry(f"{width}x{height}")
         root.minsize(860, 620)
-        root.configure(background="#f3f5f8")
-        if sys.platform == "win32":
-            font_family, font_size = "Microsoft YaHei UI", 10
-        elif sys.platform == "darwin":
-            font_family, font_size = "PingFang SC", 11
-        else:
-            font_family, font_size = "sans-serif", 10
-        root.option_add("*Font", (font_family, font_size))
+        root.configure(background=ui.background)
+        self.report["displayScale"] = round(_window_scale(root), 3)
+        # A native table keeps large directories responsive. Its neutral,
+        # borderless style matches the custom controls around it.
         style = ttk.Style(root)
         if "clam" in style.theme_names():
             style.theme_use("clam")
-        style.configure("TFrame", background="#f3f5f8")
-        style.configure("TLabel", background="#f3f5f8", foreground="#243247")
-        style.configure("Muted.TLabel", foreground="#68788d")
-        style.configure("Title.TLabel", font=(font_family, 22, "bold"), foreground="#17283f")
-        style.configure("TLabelframe", background="#f3f5f8", bordercolor="#d8e0ea")
-        style.configure("TLabelframe.Label", background="#f3f5f8", foreground="#243247",
-                        font=(font_family, font_size, "bold"))
-        style.configure("TButton", padding=(10, 5))
-        style.configure("Primary.TButton", background="#2563eb", foreground="white",
-                        padding=(20, 6), font=(font_family, font_size, "bold"))
-        style.map("Primary.TButton", background=[("disabled", "#b1bdd0"), ("active", "#1d4ed8")],
-                  foreground=[("disabled", "#f5f7fb")])
-        style.configure("Treeview", rowheight=31, font=(font_family, font_size),
-                        fieldbackground="white", background="white", foreground="#243247")
-        style.configure("Treeview.Heading", font=(font_family, font_size, "bold"), padding=(5, 5))
-        style.map("Treeview", background=[("selected", "#dceaff")],
-                  foreground=[("selected", "#153d73")])
-        style.configure("TProgressbar", background="#2563eb", troughcolor="#dfe6ef")
+        scale = _window_scale(root)
+        style.configure("Modern.Treeview", rowheight=round(33 * scale), font=(ui.family, -round(13 * scale)),
+                        fieldbackground=ui.surface, background=ui.surface,
+                        foreground=ui.ink, borderwidth=0, relief="flat")
+        style.configure("Modern.Treeview.Heading", font=(ui.family, -round(12 * scale), "bold"),
+                        background="#F4F7FC", foreground="#6F7F95", relief="flat",
+                        borderwidth=0, padding=(round(8 * scale), round(8 * scale)))
+        style.map("Modern.Treeview", background=[("selected", "#EDF3FF")],
+                  foreground=[("selected", "#1E4E9B")])
+        style.map("Modern.Treeview.Heading", background=[("active", "#EDF3FF")],
+                  relief=[("active", "flat"), ("pressed", "flat")])
+        style.layout("Modern.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
+        style.configure("Modern.Horizontal.TProgressbar", background=ui.accent,
+                        troughcolor="#E5ECF7", borderwidth=0, thickness=round(4 * scale),
+                        lightcolor=ui.accent, darkcolor=ui.accent)
 
-        outer = ttk.Frame(root, padding=(16, 12, 16, 10))
-        outer.pack(fill="both", expand=True)
+        outer = ui.frame(root)
+        outer.pack(fill="both", expand=True, padx=18, pady=12)
         outer.columnconfigure(0, weight=1)
         outer.rowconfigure(2, weight=1)
-        header = ttk.Frame(outer)
+        header = ui.frame(outer)
         header.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        ttk.Label(header, text="井下压力数据导出", style="Title.TLabel").pack(side="left")
-        ttk.Label(header, text="HDF5  →  Excel / CSV", style="Muted.TLabel").pack(side="right", pady=(6, 0))
+        heading = ui.frame(header)
+        heading.pack(side="left")
+        ui.label(heading, text="井下压力数据导出", font=(ui.family, 25, "bold")).pack(anchor="w")
+        ui.label(heading, text="将 HDF5 数据转换为 Excel 或 CSV", muted=True, font=ui.small).pack(anchor="w", pady=(2, 0))
+        ui.label(header, text="HDF5  →  EXCEL / CSV", muted=True, font=ui.small).pack(side="right", pady=(10, 0))
 
-        source = ttk.LabelFrame(outer, text="1  选择数据", padding=8)
+        source = ui.frame(outer, card=True)
         source.grid(row=1, column=0, sticky="ew", pady=(0, 8))
         source.columnconfigure(0, weight=1)
-        self.source_entry = ttk.Entry(source, textvariable=self.source)
-        self.source_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        source_title = ui.frame(source)
+        source_title.grid(row=0, column=0, columnspan=4, sticky="ew", padx=14, pady=(10, 7))
+        ui.step(source_title, 1, "选择数据")
+        self.source_entry = ui.entry(source, self.source)
+        self.source_entry.grid(row=1, column=0, sticky="ew", padx=(14, 8), pady=(0, 12))
         self.source_entry.bind("<Return>", lambda _event: self.scan_source())
-        self.folder_button = ttk.Button(source, text="选择文件夹", command=self.choose_source_folder)
-        self.folder_button.grid(row=0, column=1, padx=(0, 6))
-        self.files_button = ttk.Button(source, text="选择文件", command=self.choose_source_files)
-        self.files_button.grid(row=0, column=2, padx=(0, 6))
-        self.scan_button = ttk.Button(source, text="刷新", command=self.scan_source)
-        self.scan_button.grid(row=0, column=3)
+        self.folder_button = ui.button(source, "选择文件夹", self.choose_source_folder, width=112)
+        self.folder_button.grid(row=1, column=1, padx=(0, 7), pady=(0, 12))
+        self.files_button = ui.button(source, "选择文件", self.choose_source_files, width=98)
+        self.files_button.grid(row=1, column=2, padx=(0, 7), pady=(0, 12))
+        self.scan_button = ui.button(source, "刷新", self.scan_source, quiet=True, width=60)
+        self.scan_button.grid(row=1, column=3, padx=(0, 14), pady=(0, 12))
 
-        file_frame = ttk.LabelFrame(outer, text="2  勾选文件", padding=8)
+        file_frame = ui.frame(outer, card=True)
         file_frame.grid(row=2, column=0, sticky="nsew", pady=(0, 8))
         file_frame.columnconfigure(0, weight=1)
-        # Preserve a useful viewport even on a 1024 x 768 desktop. The empty
-        # results log must never push this table down to its heading alone.
-        file_frame.rowconfigure(1, weight=1, minsize=140)
-        toolbar = ttk.Frame(file_frame)
-        toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        ttk.Button(toolbar, text="全部勾选", command=lambda: self.choose_all(True)).pack(side="left")
-        ttk.Button(toolbar, text="全部清空", command=lambda: self.choose_all(False)).pack(side="left", padx=6)
-        self.configure_button = ttk.Button(toolbar, text="字段 / 时间设置", command=self.configure_file)
-        self.configure_button.pack(side="left")
-        ttk.Label(toolbar, textvariable=self.selection_info, style="Muted.TLabel").pack(side="right")
-        table = ttk.Frame(file_frame)
-        table.grid(row=1, column=0, sticky="nsew")
+        file_frame.rowconfigure(1, weight=1, minsize=round(120 * scale))
+        toolbar = ui.frame(file_frame)
+        toolbar.grid(row=0, column=0, sticky="ew", padx=14, pady=(9, 7))
+        ui.step(toolbar, 2, "文件列表")
+        self.configure_button = ui.button(toolbar, "字段与时间设置", self.configure_file,
+                                           quiet=True, width=126, height=30)
+        self.configure_button.pack(side="right")
+        ui.button(toolbar, "清空选择", lambda: self.choose_all(False), quiet=True,
+                  width=82, height=30).pack(side="right", padx=(0, 5))
+        ui.button(toolbar, "全选", lambda: self.choose_all(True), quiet=True,
+                  width=58, height=30).pack(side="right", padx=(0, 5))
+        table = ui.frame(file_frame)
+        table.grid(row=1, column=0, sticky="nsew", padx=14)
         table.columnconfigure(0, weight=1)
-        table.rowconfigure(0, weight=1, minsize=140)
+        table.rowconfigure(0, weight=1, minsize=round(120 * scale))
         self.tree = ttk.Treeview(table, columns=("choose", "name", "size", "fields", "state"),
-                                 show="headings", selectmode="extended", height=7)
-        columns = [("choose", "勾选", 48, False), ("name", "文件名", 295, True),
-                   ("size", "大小", 84, False), ("fields", "导出字段", 215, True),
-                   ("state", "状态", 190, True)]
-        for column, title, width, stretch in columns:
+                                 show="headings", selectmode="extended", height=6, style="Modern.Treeview")
+        columns = [("choose", "选择", 48, False), ("name", "文件名", 280, True),
+                   ("size", "大小", 80, False), ("fields", "导出字段", 210, True),
+                   ("state", "状态", 180, True)]
+        for column, title, column_width, stretch in columns:
             self.tree.heading(column, text=title)
-            self.tree.column(column, width=width, minwidth=width if not stretch else 100,
+            self.tree.column(column, width=column_width, minwidth=column_width if not stretch else 100,
                              stretch=stretch, anchor="center" if column in {"choose", "size"} else "w")
         self.tree.grid(row=0, column=0, sticky="nsew")
-        scrollbar = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview)
-        scrollbar.grid(row=0, column=1, sticky="ns")
+        scrollbar = ctk.CTkScrollbar(table, orientation="vertical", command=self.tree.yview,
+                                     fg_color=ui.surface, button_color="#C8D4E6",
+                                     button_hover_color="#A7B9D1", width=12)
+        scrollbar.grid(row=0, column=1, sticky="ns", padx=(3, 0))
         self.tree.configure(yscrollcommand=scrollbar.set)
         self.tree.bind("<Button-1>", self._tree_click)
         self.tree.bind("<space>", self._toggle_highlighted)
         self.tree.bind("<Double-1>", self._tree_double_click)
         self.tree.bind("<<TreeviewSelect>>", self._file_focus_changed)
-        pagination = ttk.Frame(file_frame)
-        pagination.grid(row=2, column=0, sticky="ew", pady=(4, 0))
-        ttk.Label(pagination, textvariable=self.page_info, style="Muted.TLabel").pack(side="left")
-        self.next_button = ttk.Button(pagination, text="下一页", command=lambda: self.change_page(1))
+        pagination = ui.frame(file_frame)
+        pagination.grid(row=2, column=0, sticky="ew", padx=14, pady=(4, 0))
+        ui.label(pagination, textvariable=self.selection_info, muted=True, font=ui.small).pack(side="left")
+        self.next_button = ui.button(pagination, "下一页 ›", lambda: self.change_page(1),
+                                      quiet=True, width=78, height=26)
         self.next_button.pack(side="right")
-        self.prev_button = ttk.Button(pagination, text="上一页", command=lambda: self.change_page(-1))
-        self.prev_button.pack(side="right", padx=6)
-        ttk.Label(file_frame, textvariable=self.detail, style="Muted.TLabel", wraplength=930).grid(
-            row=3, column=0, sticky="ew", pady=(4, 0))
+        self.prev_button = ui.button(pagination, "‹ 上一页", lambda: self.change_page(-1),
+                                      quiet=True, width=78, height=26)
+        self.prev_button.pack(side="right", padx=(0, 2))
+        ui.label(pagination, textvariable=self.page_info, muted=True, font=ui.small).pack(side="right", padx=(8, 12))
+        ui.label(file_frame, textvariable=self.detail, muted=True, font=ui.small,
+                  wraplength=900).grid(row=3, column=0, sticky="ew", padx=14, pady=(0, 7))
 
-        output = ttk.LabelFrame(outer, text="3  保存与导出", padding=8)
+        output = ui.frame(outer, card=True)
         output.grid(row=3, column=0, sticky="ew", pady=(0, 8))
         output.columnconfigure(0, weight=1)
-        self.output_entry = ttk.Entry(output, textvariable=self.output)
-        self.output_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        output_title = ui.frame(output)
+        output_title.grid(row=0, column=0, columnspan=3, sticky="ew", padx=14, pady=(9, 7))
+        ui.step(output_title, 3, "保存与导出")
+        self.output_entry = ui.entry(output, self.output)
+        self.output_entry.grid(row=1, column=0, sticky="ew", padx=(14, 8))
         self.output.trace_add("write", lambda *_args: self._settings_changed())
-        self.output_button = ttk.Button(output, text="保存文件夹", command=self.choose_output_folder)
-        self.output_button.grid(row=0, column=1, padx=(0, 8))
-        self.format_combo = ttk.Combobox(output, textvariable=self.format,
-                                        values=("Excel (.xlsx)", "CSV (.csv)"), state="readonly", width=16)
-        self.format_combo.grid(row=0, column=2)
-        self.format_combo.bind("<<ComboboxSelected>>", lambda _event: self._settings_changed())
-        options = ttk.Frame(output)
-        options.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(6, 0))
-        self.advanced_button = ttk.Button(options, text="▸  采样与单位", command=self.toggle_advanced)
+        self.output_button = ui.button(output, "保存文件夹", self.choose_output_folder, width=112)
+        self.output_button.grid(row=1, column=1, padx=(0, 8))
+        self.format_combo = ui.combo(output, self.format, ("Excel (.xlsx)", "CSV (.csv)"), width=158,
+                                      command=lambda _choice: self._settings_changed())
+        self.format_combo.grid(row=1, column=2, padx=(0, 14))
+        options = ui.frame(output)
+        options.grid(row=2, column=0, columnspan=3, sticky="ew", padx=14, pady=(5, 7))
+        self.advanced_button = ui.button(options, "采样与单位  ›", self.toggle_advanced,
+                                          quiet=True, width=120, height=26)
         self.advanced_button.pack(side="left")
         self.settings_summary = tk.StringVar(value="每 10 秒取样 · 温度 °C · 压力 PSI")
-        ttk.Label(options, textvariable=self.settings_summary, style="Muted.TLabel").pack(side="left", padx=12)
-        self.advanced = ttk.Frame(output)
-        self.advanced.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(6, 0))
-        ttk.Label(self.advanced, text="采样间隔（秒）").grid(row=0, column=0, padx=(0, 8))
-        self.interval_entry = ttk.Entry(self.advanced, textvariable=self.interval, width=9)
-        self.interval_entry.grid(row=0, column=1, padx=(0, 20))
-        ttk.Label(self.advanced, text="温度").grid(row=0, column=2, padx=(0, 8))
-        self.temp_combo = ttk.Combobox(self.advanced, textvariable=self.temperature,
-                                      values=list(TEMPERATURE_UNITS), state="readonly", width=15)
-        self.temp_combo.grid(row=0, column=3, padx=(0, 20))
-        ttk.Label(self.advanced, text="压力").grid(row=0, column=4, padx=(0, 8))
-        self.pres_combo = ttk.Combobox(self.advanced, textvariable=self.pressure,
-                                      values=list(PRESSURE_UNITS), state="readonly", width=9)
+        ui.label(options, textvariable=self.settings_summary, muted=True, font=ui.small).pack(side="left", padx=12)
+        self.advanced = ui.frame(output)
+        self.advanced.grid(row=3, column=0, columnspan=3, sticky="ew", padx=14, pady=(0, 10))
+        ui.label(self.advanced, text="采样间隔（秒）", font=ui.small).grid(row=0, column=0, padx=(0, 8))
+        self.interval_entry = ui.entry(self.advanced, self.interval, width=84)
+        self.interval_entry.grid(row=0, column=1, padx=(0, 18))
+        ui.label(self.advanced, text="温度", font=ui.small).grid(row=0, column=2, padx=(0, 8))
+        self.temp_combo = ui.combo(self.advanced, self.temperature, TEMPERATURE_UNITS, width=150)
+        self.temp_combo.grid(row=0, column=3, padx=(0, 18))
+        ui.label(self.advanced, text="压力", font=ui.small).grid(row=0, column=4, padx=(0, 8))
+        self.pres_combo = ui.combo(self.advanced, self.pressure, PRESSURE_UNITS, width=110)
         self.pres_combo.grid(row=0, column=5)
-        ttk.Label(self.advanced, text="时间范围和个别文件的配置可在“字段 / 时间设置”中调整。",
-                  style="Muted.TLabel").grid(row=1, column=0, columnspan=6, sticky="w", pady=(4, 0))
         self.advanced.grid_remove()
         for variable in (self.interval, self.temperature, self.pressure):
             variable.trace_add("write", lambda *_args: self._settings_changed())
 
-        footer = ttk.Frame(outer)
+        footer = ui.frame(outer)
         footer.grid(row=4, column=0, sticky="ew")
         footer.columnconfigure(0, weight=1)
-        actions = ttk.Frame(footer)
-        actions.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        ttk.Label(actions, textvariable=self.status, wraplength=570).pack(side="left")
-        self.export_button = ttk.Button(actions, text="开始导出", style="Primary.TButton", command=self.start_export)
+        actions = ui.frame(footer)
+        actions.grid(row=0, column=0, sticky="ew", pady=(0, 7))
+        ui.label(actions, textvariable=self.status, muted=True, font=ui.small,
+                  wraplength=390).pack(side="left")
+        self.export_button = ui.button(actions, "开始导出  →", self.start_export,
+                                        primary=True, width=144, height=36)
         self.export_button.pack(side="right")
-        self.cancel_button = ttk.Button(actions, text="取消任务", command=self.cancel_export, state="disabled")
+        self.cancel_button = ui.button(actions, "取消任务", self.cancel_export, quiet=True,
+                                        width=90, state="disabled")
         self.cancel_button.pack(side="right", padx=8)
-        self.open_button = ttk.Button(actions, text="打开结果文件夹", command=self.open_output, state="disabled")
+        self.open_button = ui.button(actions, "打开结果文件夹", self.open_output, quiet=True,
+                                      width=130, state="disabled")
         self.open_button.pack(side="right")
-        self.progress = ttk.Progressbar(footer, maximum=100, mode="determinate")
+        self.progress = ttk.Progressbar(footer, maximum=100, mode="determinate",
+                                        style="Modern.Horizontal.TProgressbar")
         self.progress.grid(row=1, column=0, sticky="ew")
         self.log = tk.Text(footer, height=1, borderwidth=0, highlightthickness=0,
-                           background="#f3f5f8", foreground="#68788d", wrap="word", state="disabled")
+                           background=ui.background, foreground=ui.muted, font=(ui.family, -round(12 * scale)),
+                           wrap="word", state="disabled")
         self.log.grid(row=2, column=0, sticky="ew", pady=(4, 0))
         self.log.grid_remove()
         self._update_controls()
@@ -292,12 +391,12 @@ class DesktopApp:
     def _first_paint(self):
         self.root.update_idletasks()
         self.report.update(firstPaintMs=round((time.perf_counter() - self.started) * 1000, 1),
-                           backendReady=False, backendImported="app" in sys.modules)
+                           backendReady=False, backendImported="converter" in sys.modules or "app" in sys.modules)
 
     def _finish_smoke(self):
         self.report.update(success=bool(self.root.winfo_ismapped()),
-                           backendReady=False, backendImported="app" in sys.modules,
-                           heavyImports=[name for name in ("app", "numpy", "h5py", "pandas") if name in sys.modules])
+                           backendReady=False, backendImported="converter" in sys.modules or "app" in sys.modules,
+                           heavyImports=[name for name in ("converter", "app", "numpy", "h5py", "pandas") if name in sys.modules])
         self.closed = True
         self.root.destroy()
 
@@ -311,7 +410,7 @@ class DesktopApp:
 
     def _load_backend(self):
         def load():
-            backend = importlib.import_module("app")
+            backend = importlib.import_module("converter")
             config = backend.get_config()
             # A persisted removable-drive or network path can take time to check.
             # Keep those checks on this worker as well.
@@ -582,10 +681,10 @@ class DesktopApp:
     def toggle_advanced(self):
         if self.advanced.winfo_ismapped():
             self.advanced.grid_remove()
-            self.advanced_button.configure(text="▸  采样与单位")
+            self.advanced_button.configure(text="采样与单位  ›")
         else:
             self.advanced.grid()
-            self.advanced_button.configure(text="▾  采样与单位")
+            self.advanced_button.configure(text="采样与单位  ⌄")
 
     def _render_files(self):
         focus = self.tree.focus()
@@ -920,10 +1019,17 @@ class FileSettings:
 
     def __init__(self, app: DesktopApp, path: str, data: dict):
         self.app, self.path, self.data = app, path, data
-        self.window = tk.Toplevel(app.root)
+        self.design = ui = app.design
+        self.window = ctk.CTkToplevel(app.root, fg_color=ui.background)
         self.window.title("字段与时间设置")
-        self.window.geometry("790x610")
-        self.window.minsize(700, 550)
+        scale = _window_scale(self.window)
+        available_width = int((app.root.winfo_screenwidth() - 80) / scale)
+        available_height = int((app.root.winfo_screenheight() - 96) / scale)
+        width = min(850, max(760, available_width))
+        height = min(650, max(600, available_height))
+        self.window.maxsize(available_width, available_height)
+        self.window.geometry(f"{width}x{height}")
+        self.window.minsize(760, 600)
         self.window.transient(app.root)
         self.window.grab_set()
         self.paths = [item["path"] for item in data["datasets"]]
@@ -942,98 +1048,130 @@ class FileSettings:
         self.interval = tk.StringVar(value=str(previous.get("interval", app.interval.get())))
         self.temperature = tk.StringVar(value=_label_for(TEMPERATURE_UNITS, previous.get("tempUnit"), app.temperature.get()))
         self.pressure = tk.StringVar(value=_label_for(PRESSURE_UNITS, previous.get("presUnit"), app.pressure.get()))
-        content = ttk.Frame(self.window, padding=18)
-        content.pack(fill="both", expand=True)
-        content.rowconfigure(1, weight=1)
+        content = ui.frame(self.window)
+        content.pack(fill="both", expand=True, padx=20, pady=16)
+        content.rowconfigure(2, weight=1)
         content.columnconfigure(0, weight=1)
-        ttk.Label(content, text=os.path.basename(path), font=("Microsoft YaHei UI" if sys.platform == "win32" else "sans-serif", 13, "bold")).grid(
-            row=0, column=0, sticky="w", pady=(0, 12))
-        notebook = ttk.Notebook(content)
-        notebook.grid(row=1, column=0, sticky="nsew")
-        fields = ttk.Frame(notebook, padding=12)
-        timing = ttk.Frame(notebook, padding=16)
-        naming = ttk.Frame(notebook, padding=16)
-        notebook.add(fields, text="导出字段")
-        notebook.add(timing, text="时间与采样")
-        notebook.add(naming, text="文件名称")
+        heading = ui.frame(content)
+        heading.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        ui.label(heading, text="字段与时间设置", font=(ui.family, 21, "bold")).pack(anchor="w")
+        ui.label(heading, text=os.path.basename(path), muted=True, font=ui.small).pack(anchor="w", pady=(3, 0))
+        self.tab_selector = ctk.CTkSegmentedButton(
+            content, values=["导出字段", "时间与采样", "文件名称"], height=34,
+            font=(ui.family, 13, "bold"), corner_radius=8, border_width=3,
+            fg_color="#E8EDF5", selected_color="#D6E5FF", selected_hover_color="#C4DBFF",
+            unselected_color="#E8EDF5", unselected_hover_color="#DEE7F4", text_color="#22549D",
+            command=self._show_tab)
+        self.tab_selector.grid(row=1, column=0, sticky="w", pady=(0, 10))
+        fields = ui.frame(content, card=True)
+        timing = ui.frame(content, card=True)
+        naming = ui.frame(content, card=True)
+        self.pages = {"导出字段": fields, "时间与采样": timing, "文件名称": naming}
+        for page in self.pages.values():
+            page.grid(row=2, column=0, sticky="nsew")
+            page.grid_remove()
+        self.tab_selector.set("导出字段")
+        self._show_tab("导出字段")
         fields.columnconfigure(0, weight=1)
-        fields.rowconfigure(2, weight=1)
-        presets = ttk.Frame(fields)
-        presets.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        ttk.Label(presets, text="常用配置").pack(side="left", padx=(0, 8))
+        fields.rowconfigure(2, weight=1, minsize=round(120 * scale))
+        presets = ui.frame(fields)
+        presets.grid(row=0, column=0, sticky="ew", padx=14, pady=(14, 8))
+        ui.label(presets, text="常用配置", font=ui.small).pack(side="left", padx=(0, 10))
         self.preset = tk.StringVar(value="自动推荐")
-        self.preset_combo = ttk.Combobox(presets, textvariable=self.preset,
-                                         values=["自动推荐"] + list(app.presets), state="readonly", width=24)
+        self.preset_combo = ui.combo(presets, self.preset, ["自动推荐"] + list(app.presets),
+                                      width=240, command=lambda _choice: self.apply_preset())
         self.preset_combo.pack(side="left", fill="x", expand=True)
-        self.preset_combo.bind("<<ComboboxSelected>>", self.apply_preset)
-        ttk.Button(presets, text="保存为配置", command=self.save_preset).pack(side="left", padx=6)
-        ttk.Button(presets, text="删除配置", command=self.delete_preset).pack(side="left")
-        search = ttk.Frame(fields)
-        search.grid(row=1, column=0, sticky="ew", pady=(0, 8))
-        ttk.Label(search, text="搜索字段").pack(side="left", padx=(0, 8))
-        ttk.Entry(search, textvariable=self.filter, width=30).pack(side="left", fill="x", expand=True)
-        ttk.Button(search, text="恢复推荐", command=self.restore_defaults).pack(side="left", padx=6)
-        table = ttk.Frame(fields)
-        table.grid(row=2, column=0, sticky="nsew")
+        ui.button(presets, "保存为配置", self.save_preset, quiet=True, width=104).pack(side="left", padx=6)
+        ui.button(presets, "删除配置", self.delete_preset, quiet=True, width=90).pack(side="left")
+        search = ui.frame(fields)
+        search.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 8))
+        ui.label(search, text="搜索字段", font=ui.small).pack(side="left", padx=(0, 10))
+        ui.entry(search, self.filter).pack(side="left", fill="x", expand=True)
+        ui.button(search, "恢复推荐", self.restore_defaults, quiet=True, width=100).pack(side="left", padx=(6, 0))
+        table = ui.frame(fields)
+        table.grid(row=2, column=0, sticky="nsew", padx=14)
         table.columnconfigure(0, weight=1)
-        table.rowconfigure(0, weight=1)
-        self.tree = ttk.Treeview(table, columns=("choose", "field", "rows"), show="headings", selectmode="extended")
-        for column, title, width in (("choose", "勾选", 48), ("field", "字段路径", 480), ("rows", "数据条数", 100)):
+        table.rowconfigure(0, weight=1, minsize=round(120 * scale))
+        self.tree = ttk.Treeview(table, columns=("choose", "field", "rows"), show="headings",
+                                 selectmode="extended", style="Modern.Treeview")
+        for column, title, column_width in (("choose", "选择", 48), ("field", "字段路径", 480), ("rows", "数据条数", 100)):
             self.tree.heading(column, text=title)
-            self.tree.column(column, width=width, stretch=column == "field", anchor="w" if column == "field" else "center")
+            self.tree.column(column, width=column_width, stretch=column == "field", anchor="w" if column == "field" else "center")
         self.tree.grid(row=0, column=0, sticky="nsew")
-        scroll = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview)
-        scroll.grid(row=0, column=1, sticky="ns")
+        scroll = ctk.CTkScrollbar(table, orientation="vertical", command=self.tree.yview,
+                                  fg_color=ui.surface, button_color="#C8D4E6",
+                                  button_hover_color="#A7B9D1", width=12)
+        scroll.grid(row=0, column=1, sticky="ns", padx=(3, 0))
         self.tree.configure(yscrollcommand=scroll.set)
         self.tree.bind("<Button-1>", self.toggle_field)
         self.tree.bind("<space>", self.toggle_selected_fields)
-        controls = ttk.Frame(fields)
-        controls.grid(row=3, column=0, sticky="ew", pady=(8, 0))
-        ttk.Button(controls, text="全选搜索结果", command=lambda: self.select_filtered(True)).pack(side="left")
-        ttk.Button(controls, text="清空搜索结果", command=lambda: self.select_filtered(False)).pack(side="left", padx=6)
-        ttk.Button(controls, text="下一页", command=lambda: self.field_change_page(1)).pack(side="right")
-        ttk.Button(controls, text="上一页", command=lambda: self.field_change_page(-1)).pack(side="right", padx=6)
-        ttk.Label(fields, textvariable=self.field_info, style="Muted.TLabel").grid(row=4, column=0, sticky="w", pady=(8, 0))
+        controls = ui.frame(fields)
+        controls.grid(row=3, column=0, sticky="ew", padx=14, pady=(6, 0))
+        ui.button(controls, "全选搜索结果", lambda: self.select_filtered(True),
+                  quiet=True, width=112, height=30).pack(side="left")
+        ui.button(controls, "清空搜索结果", lambda: self.select_filtered(False),
+                  quiet=True, width=112, height=30).pack(side="left", padx=6)
+        ui.button(controls, "下一页 ›", lambda: self.field_change_page(1),
+                  quiet=True, width=78, height=30).pack(side="right")
+        ui.button(controls, "‹ 上一页", lambda: self.field_change_page(-1),
+                  quiet=True, width=78, height=30).pack(side="right", padx=6)
+        ui.label(fields, textvariable=self.field_info, muted=True, font=ui.small).grid(
+            row=4, column=0, sticky="w", padx=14, pady=(3, 10))
         self.filter.trace_add("write", self.filter_changed)
 
-        timing.columnconfigure(1, weight=1)
-        self._row(timing, 0, "时间字段", ttk.Combobox(timing, textvariable=self.time_field,
-                  values=["自动 / 各字段自带时间"] + data.get("timeFields", self.paths), state="readonly"))
-        self._row(timing, 1, "时间格式", ttk.Combobox(timing, textvariable=self.time_type, values=list(TIME_TYPES), state="readonly"))
-        self._row(timing, 2, "开始时间", ttk.Entry(timing, textvariable=self.start))
-        self._row(timing, 3, "结束时间", ttk.Entry(timing, textvariable=self.end))
-        ttk.Label(timing, text="留空使用全部时间范围。日期格式：2026-10-08 08:00:00（UTC）。",
-                  style="Muted.TLabel").grid(row=4, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        time_content = ui.frame(timing)
+        time_content.pack(fill="both", expand=True, padx=18, pady=14)
+        time_content.columnconfigure(1, weight=1)
+        self._row(time_content, 0, "时间字段", ui.combo(time_content, self.time_field,
+                  ["自动 / 各字段自带时间"] + data.get("timeFields", self.paths)))
+        self._row(time_content, 1, "时间格式", ui.combo(time_content, self.time_type, TIME_TYPES))
+        self._row(time_content, 2, "开始时间", ui.entry(time_content, self.start))
+        self._row(time_content, 3, "结束时间", ui.entry(time_content, self.end))
+        ui.label(time_content, text="留空使用全部时间范围。日期示例：2026-10-08 08:00:00（UTC）。",
+                  muted=True, font=ui.small).grid(row=4, column=0, columnspan=2, sticky="w", pady=(0, 6))
         time_min, time_max = data.get("timeMinStr"), data.get("timeMaxStr")
         if time_min is not None and time_max is not None:
-            ttk.Label(timing, text=f"检测范围：{time_min}  —  {time_max}", style="Muted.TLabel", wraplength=640).grid(
-                row=5, column=0, columnspan=2, sticky="w", pady=(0, 12))
-        self._row(timing, 6, "相对时间基准", ttk.Entry(timing, textvariable=self.base_date))
-        ttk.Checkbutton(timing, text="此文件使用单独的采样与单位", variable=self.override).grid(
-            row=7, column=0, columnspan=2, sticky="w", pady=(8, 12))
-        self._row(timing, 8, "采样间隔（秒）", ttk.Entry(timing, textvariable=self.interval))
-        self._row(timing, 9, "温度 / 压力", self._unit_controls(timing))
-        naming.columnconfigure(0, weight=1)
-        ttk.Label(naming, text="输出文件名称").grid(row=0, column=0, sticky="w", pady=(0, 8))
-        ttk.Entry(naming, textvariable=self.name).grid(row=1, column=0, sticky="ew")
-        ttk.Label(naming, text="导出时按主界面所选格式设置后缀。批量文件重名时自动编号。",
-                  style="Muted.TLabel", wraplength=620).grid(row=2, column=0, sticky="w", pady=(10, 0))
-        buttons = ttk.Frame(content)
-        buttons.grid(row=2, column=0, sticky="ew", pady=(14, 0))
-        ttk.Button(buttons, text="保存设置", style="Primary.TButton", command=self.save).pack(side="right")
-        ttk.Button(buttons, text="取消", command=self.window.destroy).pack(side="right", padx=8)
+            ui.label(time_content, text=f"检测范围：{time_min}  —  {time_max}", muted=True,
+                      font=ui.small, wraplength=720).grid(row=5, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        self._row(time_content, 6, "相对时间基准", ui.entry(time_content, self.base_date))
+        ctk.CTkCheckBox(time_content, text="此文件使用单独的采样与单位", variable=self.override,
+                        font=ui.font, text_color=ui.ink, fg_color=ui.accent, hover_color="#1D51CA",
+                        border_color="#BFCCE0", corner_radius=5, checkbox_width=20,
+                        checkbox_height=20, border_width=2, height=24).grid(
+            row=7, column=0, columnspan=2, sticky="w", pady=(2, 8))
+        self._row(time_content, 8, "采样间隔（秒）", ui.entry(time_content, self.interval))
+        self._row(time_content, 9, "温度 / 压力", self._unit_controls(time_content))
+        name_content = ui.frame(naming)
+        name_content.pack(fill="both", expand=True, padx=18, pady=18)
+        name_content.columnconfigure(0, weight=1)
+        ui.label(name_content, text="输出文件名称", font=ui.heading).grid(row=0, column=0, sticky="w", pady=(0, 10))
+        ui.entry(name_content, self.name).grid(row=1, column=0, sticky="ew")
+        ui.label(name_content, text="后缀按主界面所选格式自动设置。批量文件重名时自动编号。",
+                  muted=True, font=ui.small, wraplength=680).grid(row=2, column=0, sticky="w", pady=(12, 0))
+        buttons = ui.frame(content)
+        buttons.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+        ui.button(buttons, "保存设置", self.save, primary=True, width=132, height=36).pack(side="right")
+        ui.button(buttons, "取消", self.window.destroy, quiet=True, width=90).pack(side="right", padx=8)
         self.render_fields()
 
+    def _show_tab(self, selected):
+        for title, frame in self.pages.items():
+            if title == selected:
+                frame.grid()
+            else:
+                frame.grid_remove()
+
     def _unit_controls(self, parent):
-        frame = ttk.Frame(parent)
-        ttk.Combobox(frame, textvariable=self.temperature, values=list(TEMPERATURE_UNITS), state="readonly", width=16).pack(side="left")
-        ttk.Combobox(frame, textvariable=self.pressure, values=list(PRESSURE_UNITS), state="readonly", width=12).pack(side="left", padx=12)
+        ui = self.design
+        frame = ui.frame(parent)
+        ui.combo(frame, self.temperature, TEMPERATURE_UNITS, width=160).pack(side="left")
+        ui.combo(frame, self.pressure, PRESSURE_UNITS, width=120).pack(side="left", padx=12)
         return frame
 
-    @staticmethod
-    def _row(parent, row, label, widget):
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 16), pady=(0, 12))
-        widget.grid(row=row, column=1, sticky="ew", pady=(0, 12))
+    def _row(self, parent, row, label, widget):
+        self.design.label(parent, text=label, font=self.design.small).grid(
+            row=row, column=0, sticky="w", padx=(0, 16), pady=(0, 6))
+        widget.grid(row=row, column=1, sticky="ew", pady=(0, 6))
 
     def filtered_fields(self):
         query = self.filter.get().strip().lower().replace("temperature", "temp").replace("pressure", "pres")
@@ -1184,7 +1322,7 @@ class FileSettings:
 def main(smoke_test: bool = False) -> dict:
     """Run the native app, or paint and close it for Windows CI verification."""
     started = time.perf_counter()
-    root = tk.Tk()
+    root = ctk.CTk()
     desktop = DesktopApp(root, smoke_test=smoke_test, started=started)
     root.mainloop()
     return desktop.report

@@ -1,0 +1,99 @@
+井下压力 HDF5 转 Excel / CSV — 软件文件说明
+版本：2.1.0
+
+一、推荐使用方式
+
+安装版：双击 H5ToExcelConverter-Setup-x64.exe 或 -x86.exe，按提示安装。
+安装到当前用户的应用目录，无需管理员权限；从桌面或开始菜单快捷方式打开。
+x64 与 x86 安装目录独立，可以并存。
+
+免安装版：将 H5ToExcelConverter-Windows-x64.zip 或 -x86.zip 完整解压
+到一个独立文件夹，打开该文件夹，双击 H5ToExcelConverter.exe。
+ZIP 根目录直接包含 EXE、_internal 和说明文件，解压一次即可使用。
+移动软件时，请把整个解压后的文件夹一起移动。
+
+安装包在安装时一次性解压依赖，之后启动直接读取已安装的文件。
+免安装版在首次解压后也直接读取依赖。两种方式都无需另外安装 Python。
+
+二、程序目录中的文件有什么用
+
+H5ToExcelConverter.exe
+  主程序，包含启动入口和大部分应用代码。
+
+_internal 文件夹
+  软件运行所需的依赖目录。请保留整个文件夹与它内部的相对位置。
+  安装版会把它放在应用安装目录，日常从快捷方式打开即可。
+
+_internal\python*.dll、基础扩展 .pyd
+  随软件提供的 Python 运行环境，负责执行程序和基础文件操作。
+
+_internal\base_library.zip
+  Python 基础库模块。程序直接从压缩包加载模块；无需手动解压。
+  保持压缩形式减少零散文件数量，运行时需要此文件。
+
+_internal\h5py、hdf5.dll 与相关二进制库
+  读取 HDF5 文件、识别数据字段与时间轴。
+
+_internal\numpy、numpy.libs 或 numpy\.libs
+  高效数组处理、时间采样、查找和单位转换。
+  OpenBLAS 等较大的 DLL 来自 NumPy 安装包，是配套二进制依赖。
+
+_internal\tcl86t.dll、tk86t.dll、_tcl_data、_tk_data、tcl8 等
+  窗口、文件选择器、文字编码和桌面基础组件。
+  这里有较多小文件，主要是界面脚本与编码支持。
+
+_internal\customtkinter
+  现代圆角控件、主题、字体和绘制支持。
+
+其他随包的 DLL、.pyd、包元数据与许可证
+  由打包工具根据依赖关系收集，可能承担运行库、模块加载或版本查询。
+  每个架构的名称和数量可能不同，请保持对应发行包完整。
+
+_internal\config.default.json
+  通用默认设置与字段预设，不含开发电脑路径或生产数据。
+
+config.json（使用后可能出现）
+  个人设置，包括文件夹路径、采样参数与字段预设。
+  程序优先保存在同目录；目录不可写时使用：
+  %LOCALAPPDATA%\H5ToExcelConverter\config.json
+  迁移或更新免安装版时可保留个人设置文件。
+
+使用说明.md、软件文件说明.txt
+  使用方法和文件说明，可阅读，无需执行。
+
+三、下载的压缩包和运行库压缩包
+
+安装版从 GitHub Artifacts 下载的是 ZIP；解压后包含一个 Setup EXE 和
+对应的 .sha256 校验文件，运行 Setup EXE 即可安装。
+
+免安装版从 GitHub Artifacts 下载的 ZIP 直接包含 EXE、_internal 和说明文件。
+将所有内容一次解压到独立文件夹，即可双击 EXE 使用。
+
+安装成功或软件完整解压后，下载包、安装程序和 .sha256 可移走。
+
+软件目录中的 _internal\base_library.zip 属于正在使用的运行库，请保留。
+无需把它解压，也无需在启动前处理它。
+
+四、为什么采用这种打包方式
+
+独立软件表示运行依赖已随包提供，使用电脑无需另装 Python 或其他组件。
+把依赖预先放在软件目录可以直接启动。单文件便携 EXE 则需要每次启动时
+把依赖解压到临时目录，通常会增加打开时间。
+
+2.1.0 将桌面转换核心与可选浏览器服务拆开。桌面发行版只收集界面、
+HDF5 读取与 Excel / CSV 导出所需依赖，Web 服务依赖单独留在源码开发环境。
+软件大小请以对应版本的实际下载文件和构建摘要为准。
+
+五、Mac 与 Windows 编译、验证
+
+开发电脑 Mac 可以运行跨平台源码和导出逻辑测试。
+Windows EXE 在 GitHub Windows 云端编译，并在云端实际启动和执行导出自检。
+无需在这台 Mac 上安装 Windows 或运行本机虚拟机。
+GitHub 的 Windows 执行环境本身是由 GitHub 管理的云端托管虚拟机。
+
+源码与构建记录：
+https://github.com/liyongliao/CNOOCHDF5toExcle
+https://github.com/liyongliao/CNOOCHDF5toExcle/actions/workflows/build.yml
+
+云端测试使用临时生成的数据。云端启动耗时与开发电脑的源码性能测试
+对应不同环境；实际使用速度取决于 Windows 电脑和数据。

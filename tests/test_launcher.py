@@ -12,7 +12,7 @@ class LauncherTests(unittest.TestCase):
     def test_import_entry_point_without_loading_engine(self):
         result = subprocess.run(
             [sys.executable, '-c',
-             "import run, sys, json; print(json.dumps([name for name in ('app', 'numpy', 'h5py', 'tkinter') if name in sys.modules]))"],
+             "import run, desktop_entry, sys, json; print(json.dumps([name for name in ('app', 'converter', 'numpy', 'h5py', 'tkinter', 'customtkinter') if name in sys.modules]))"],
             cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True,
         )
         self.assertEqual(json.loads(result.stdout), [])

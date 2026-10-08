@@ -1,0 +1,5 @@
+# Optional browser interface for source development (Python 3.11+).
+# Not installed or bundled by the Windows desktop build.
+-r requirements.txt
+fastapi==0.142.4
+uvicorn==0.54.0

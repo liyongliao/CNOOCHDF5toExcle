@@ -1,6 +1,8 @@
-# Windows x64 / Python 3.11. 32-bit builds use requirements-win-x86.txt.
-fastapi==0.142.4
-uvicorn==0.54.0
+# Desktop Windows x64 / Python 3.11. No web server or browser is required.
 h5py==3.16.0
 numpy==2.4.6
 openpyxl==3.1.5
+et-xmlfile==2.0.0
+customtkinter==5.2.2
+darkdetect==0.8.0
+packaging==24.2

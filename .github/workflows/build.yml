@@ -19,7 +19,7 @@ jobs:
   build:
     name: Windows ${{ matrix.architecture }}
     runs-on: windows-2022
-    timeout-minutes: 25
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -69,34 +69,55 @@ jobs:
       - name: Verify packaged Windows application
         run: ./scripts/verify_windows.ps1 -ExpectedBits ${{ matrix.bits }}
 
-      - name: Package complete application folder
+      - name: Audit shipped runtime files
+        run: python scripts/package_manifest.py
+
+      - name: Build single Windows installer
+        run: ./scripts/build_installer.ps1 -Architecture ${{ matrix.architecture }}
+
+      - name: Verify installation and installed application
+        run: ./scripts/verify_installer.ps1 -Architecture ${{ matrix.architecture }} -ExpectedBits ${{ matrix.bits }}
+
+      - name: Record package information
         shell: pwsh
         run: |
-          $package = 'H5ToExcelConverter-Windows-${{ matrix.architecture }}.zip'
-          Compress-Archive -Path dist/H5ToExcelConverter -DestinationPath "dist/$package" -CompressionLevel Optimal
-          $hash = (Get-FileHash "dist/$package" -Algorithm SHA256).Hash.ToLower()
-          "$hash  $package" | Set-Content -Path "dist/$package.sha256" -Encoding utf8
+          $installer = 'H5ToExcelConverter-Setup-${{ matrix.architecture }}.exe'
+          $hash = (Get-FileHash "dist/$installer" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $installer" | Set-Content -Path "dist/$installer.sha256" -Encoding utf8
           python -m pip freeze | Set-Content test-reports/dependencies.txt
           $gui = Get-Content test-reports/packaged-smoke-test.json | ConvertFrom-Json
-          $size = [math]::Round((Get-Item "dist/$package").Length / 1MB, 1)
+          $manifest = Get-Content test-reports/package-manifest.json | ConvertFrom-Json
+          $size = [math]::Round((Get-Item "dist/$installer").Length / 1MB, 1)
+          $installedSize = [math]::Round($manifest.bytes / 1MB, 1)
           @"
           ### Windows ${{ matrix.architecture }}
-          - Package: ``$package`` ($size MB)
-          - Desktop smoke test: passed ($($gui.seconds) s; scientific libraries loaded: $($gui.scientific_libraries_loaded))
-          - Packaged HDF5 → Excel / CSV: passed
+          - Installer: ``$installer`` ($size MiB)
+          - Installed application: $installedSize MiB / $($manifest.file_count) runtime files
+          - Desktop smoke test: passed ($($gui.process_wall_seconds) s; scientific libraries loaded: $($gui.scientific_libraries_loaded))
+          - Packaged and installed HDF5 → Excel / CSV: passed
           - SHA256: ``$hash``
           "@ | Add-Content $env:GITHUB_STEP_SUMMARY
 
-      - name: Upload Windows download
+      - name: Upload single installer
         uses: actions/upload-artifact@v7
         with:
-          name: H5ToExcelConverter-Windows-${{ matrix.architecture }}
+          name: H5ToExcelConverter-Setup-${{ matrix.architecture }}
           path: |
-            dist/H5ToExcelConverter-Windows-${{ matrix.architecture }}.zip
-            dist/H5ToExcelConverter-Windows-${{ matrix.architecture }}.zip.sha256
+            dist/H5ToExcelConverter-Setup-${{ matrix.architecture }}.exe
+            dist/H5ToExcelConverter-Setup-${{ matrix.architecture }}.exe.sha256
           if-no-files-found: error
           retention-days: 90
           compression-level: 0
+
+      # GitHub creates the ZIP itself: do not put another application ZIP inside.
+      - name: Upload complete portable application
+        uses: actions/upload-artifact@v7
+        with:
+          name: H5ToExcelConverter-Windows-${{ matrix.architecture }}
+          path: dist/H5ToExcelConverter/
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 9
 
       - name: Upload verification reports
         if: always()

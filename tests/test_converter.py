@@ -5,6 +5,8 @@ import json
 import math
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -13,9 +15,8 @@ from unittest.mock import patch
 import h5py
 import numpy as np
 from openpyxl import load_workbook
-from fastapi import HTTPException
-
-import app
+import converter as app
+from converter import ConversionError as HTTPException
 
 
 class ConverterTests(unittest.TestCase):
@@ -231,6 +232,65 @@ class ConverterTests(unittest.TestCase):
                 app.trigger_export(app.ExportPayload(configs=[self.config(interval=interval)], outputDir=str(self.output)))
         with self.assertRaises(HTTPException):
             app.trigger_export(app.ExportPayload(configs=[self.config(selectedFields=[])], outputDir=str(self.output)))
+
+    def test_core_import_does_not_require_optional_web_dependencies(self):
+        script = """
+import importlib.abc
+import sys
+class BlockWebImports(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in {'fastapi', 'pydantic', 'uvicorn'}:
+            raise AssertionError('Desktop core imported a web dependency: ' + fullname)
+sys.meta_path.insert(0, BlockWebImports())
+import converter
+assert not any(name.split('.')[0] in {'fastapi', 'pydantic', 'uvicorn'} for name in sys.modules)
+"""
+        result = subprocess.run([sys.executable, "-c", script], cwd=str(Path(app.__file__).parent),
+                                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_payload_dataclasses_reject_invalid_shapes(self):
+        for fields in ("voltage", [None], [1], {"voltage": True}):
+            with self.subTest(fields=fields), self.assertRaises(HTTPException) as error:
+                self.config(selectedFields=fields)
+            self.assertEqual(error.exception.status_code, 422)
+        for interval in (None, True, {}, "invalid"):
+            with self.subTest(interval=interval), self.assertRaises(HTTPException):
+                self.config(interval=interval)
+        with self.assertRaises(HTTPException):
+            app.ScanPayload(path=None)
+        with self.assertRaises(HTTPException):
+            app.InspectPayload(path=[str(self.source)])
+        with self.assertRaises(HTTPException):
+            app.ExportPayload(configs=[None], outputDir=str(self.output))
+        with self.assertRaises(HTTPException):
+            app.ExportPayload(configs={}, outputDir=str(self.output))
+        with self.assertRaises(HTTPException):
+            app.ExportPayload(configs=[], outputDir=None)
+
+    def test_payload_dataclasses_preserve_defaults_and_nested_mapping_input(self):
+        config = self.config(interval="12.5")
+        self.assertEqual(config.interval, 12.5)
+        self.assertEqual(config.baseDate, "1970-01-01 00:00:00")
+        self.assertEqual(config.tempUnit, "degC")
+        self.assertEqual(config.presUnit, "PSI")
+        payload = app.ExportPayload(configs=[dict(filePath=str(self.source), selectedFields=["voltage"],
+                                                customName="result.csv")], outputDir=str(self.output))
+        self.assertIsInstance(payload.configs[0], app.ExportConfig)
+        self.assertEqual(payload.configs[0].interval, 10.0)
+        with self.assertRaises(TypeError):
+            app.ExportConfig(filePath=str(self.source), selectedFields=["voltage"])
+
+    def test_field_and_batch_limits_rejected_before_enqueue(self):
+        self.create_plain()
+        for fields in (["voltage", "voltage"], [f"field{i}" for i in range(16384)]):
+            with self.subTest(count=len(fields)), self.assertRaises(HTTPException):
+                app.trigger_export(app.ExportPayload(configs=[self.config(selectedFields=fields)],
+                                                     outputDir=str(self.output)))
+        with self.assertRaises(HTTPException) as error:
+            app.trigger_export(app.ExportPayload(configs=[self.config()] * (app.MAX_ACTIVE_TASKS + 1),
+                                                 outputDir=str(self.output)))
+        self.assertEqual(error.exception.status_code, 400)
 
     def test_unsafe_and_unsupported_output_names_rejected(self):
         self.create_plain()
