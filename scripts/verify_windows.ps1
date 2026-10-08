@@ -42,6 +42,10 @@ public class ConverterWindowCapture {
     public static extern bool GetWindowRect(IntPtr hwnd, out Rect rectangle);
     [DllImport("user32.dll")]
     public static extern bool PrintWindow(IntPtr hwnd, IntPtr destination, uint flags);
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hwnd);
+    [DllImport("user32.dll")]
+    public static extern bool RedrawWindow(IntPtr hwnd, IntPtr rectangle, IntPtr region, uint flags);
 }
 '@
     $deadline = [DateTime]::UtcNow.AddSeconds(20)
@@ -50,6 +54,8 @@ public class ConverterWindowCapture {
         $previewProcess.Refresh()
     } while ($previewProcess.MainWindowHandle -eq [IntPtr]::Zero -and [DateTime]::UtcNow -lt $deadline -and -not $previewProcess.HasExited)
     if ($previewProcess.MainWindowHandle -eq [IntPtr]::Zero) { throw 'Preview window not found' }
+    [void][ConverterWindowCapture]::SetForegroundWindow($previewProcess.MainWindowHandle)
+    [void][ConverterWindowCapture]::RedrawWindow($previewProcess.MainWindowHandle, [IntPtr]::Zero, [IntPtr]::Zero, 0x185)
     Start-Sleep -Milliseconds 1000
     $rectangle = New-Object ConverterWindowCapture+Rect
     [void][ConverterWindowCapture]::GetWindowRect($previewProcess.MainWindowHandle, [ref]$rectangle)
@@ -57,12 +63,25 @@ public class ConverterWindowCapture {
     $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
     $device = $graphics.GetHdc()
     try {
-        $captured = [ConverterWindowCapture]::PrintWindow($previewProcess.MainWindowHandle, $device, 0)
+        $captured = [ConverterWindowCapture]::PrintWindow($previewProcess.MainWindowHandle, $device, 2)
     } finally {
         $graphics.ReleaseHdc($device)
     }
     if (-not $captured) { throw 'Window preview capture unavailable' }
+    $bitmap.Save((Join-Path $reports 'desktop-preview-printwindow.png'), [System.Drawing.Imaging.ImageFormat]::Png)
+    # Private shape fonts used by Tk canvases can be omitted by PrintWindow.
+    # Prefer the actual composed desktop pixels and keep both for comparison.
+    $screenCaptured = $false
+    try {
+        $graphics.CopyFromScreen($rectangle.Left, $rectangle.Top, 0, 0, $bitmap.Size,
+                                 [System.Drawing.CopyPixelOperation]::SourceCopy)
+        $screenCaptured = $true
+    } catch {
+        Write-Warning "Composed screen capture unavailable; using PrintWindow: $_"
+    }
     $bitmap.Save((Join-Path $reports 'desktop-preview.png'), [System.Drawing.Imaging.ImageFormat]::Png)
+    @{ screen_captured = $screenCaptured; printwindow_full_content = $captured } |
+        ConvertTo-Json | Set-Content (Join-Path $reports 'desktop-preview-method.json') -Encoding utf8
     $graphics.Dispose()
     $bitmap.Dispose()
 } catch {
