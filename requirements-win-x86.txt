@@ -1,0 +1,11 @@
+# Desktop Windows 32-bit stack (Python 3.8.10).
+# h5py 2.10.0 is the last release providing official win32 wheels.
+# NumPy 1.24 removes aliases used by that h5py release.
+h5py==2.10.0
+numpy==1.23.5
+six==1.17.0
+openpyxl==3.1.5
+et-xmlfile==2.0.0
+customtkinter==5.2.2
+darkdetect==0.8.0
+packaging==24.2
