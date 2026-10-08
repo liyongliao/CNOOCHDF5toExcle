@@ -23,6 +23,7 @@ $startMenuShortcut = Join-Path $programGroup "$shortcutName.lnk"
 $registryView = if ($Architecture -eq 'x64') { [Microsoft.Win32.RegistryView]::Registry64 } else { [Microsoft.Win32.RegistryView]::Registry32 }
 $registry = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::CurrentUser, $registryView)
 $uninstallKeyPath = "Software\Microsoft\Windows\CurrentVersion\Uninstall\H5ToExcelConverter-$Architecture-ci-$testId`_is1"
+$installLogPath = Join-Path $reports "installer-install-$Architecture.log"
 $summary = [ordered]@{ status = 'failed'; architecture = $ExpectedBits; installer = $installer; tests = @(); uninstall_passed = $false; shortcuts_passed = $false }
 $failure = $null
 
@@ -58,7 +59,7 @@ try {
     [void](Invoke-CheckedProcess $installer @(
         '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NOCLOSEAPPLICATIONS', '/NORESTARTAPPLICATIONS', '/SP-',
         "/CITEST=$testId", '/TASKS=desktopicon', ('/DIR="{0}"' -f $installDirectory),
-        ('/LOG="{0}"' -f (Join-Path $reports "installer-install-$Architecture.log"))
+        ('/LOG="{0}"' -f $installLogPath)
     ))
     $installedExecutable = Join-Path $installDirectory 'H5ToExcelConverter.exe'
     if (-not (Test-Path -LiteralPath $installedExecutable -PathType Leaf)) { throw 'Installed application EXE is missing.' }
@@ -75,9 +76,29 @@ try {
     } finally {
         $reader.Dispose()
     }
-    $uninstallKey = $registry.OpenSubKey($uninstallKeyPath)
-    if ($null -eq $uninstallKey) { throw 'Current-user uninstall registration is missing.' }
-    $uninstallKey.Dispose()
+    # Inno 6.7.3 shortens long AppIds and appends a hash in the actual registry key.
+    # Read the key created by this installation, then verify its unique installation path.
+    $keyMatch = [regex]::Match((Get-Content -LiteralPath $installLogPath -Raw),
+        'Creating new uninstall key: HKEY_CURRENT_USER\\(?<key>Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\[^\r\n]+)')
+    if (-not $keyMatch.Success) { throw 'Installation log contains no current-user uninstall key.' }
+    $candidateKeyPath = $keyMatch.Groups['key'].Value
+    $expectedKeyPrefix = "Software\Microsoft\Windows\CurrentVersion\Uninstall\H5ToExcelConverter-$Architecture-ci-"
+    if (-not $candidateKeyPath.StartsWith($expectedKeyPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Installation log contains an unexpected uninstall key.'
+    }
+    $uninstallKey = $registry.OpenSubKey($candidateKeyPath)
+    if ($null -eq $uninstallKey) { throw "Current-user uninstall registration is missing: $candidateKeyPath" }
+    try {
+        $registeredDirectory = [string]$uninstallKey.GetValue('InstallLocation', '')
+        if (-not [string]::Equals($registeredDirectory.TrimEnd([char]92), $installDirectory.TrimEnd([char]92),
+                                  [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Uninstall registration does not point to this unique temporary installation.'
+        }
+    } finally {
+        $uninstallKey.Dispose()
+    }
+    $uninstallKeyPath = $candidateKeyPath
+    $summary.uninstall_key = "HKEY_CURRENT_USER\$uninstallKeyPath"
     $shell = New-Object -ComObject WScript.Shell
     try {
         foreach ($shortcut in @($desktopShortcut, $startMenuShortcut)) {
@@ -130,7 +151,7 @@ try {
         $summary.uninstall_error = $_.Exception.Message
         if ($null -eq $failure) { $failure = $_ }
     } finally {
-        # These paths and key include our fresh GUID, so cleanup cannot touch another installation.
+        # Filesystem paths use our GUID; the actual registry key was verified against that installation path.
         if (Test-Path -LiteralPath $desktopShortcut) { Remove-Item -LiteralPath $desktopShortcut -Force }
         if (Test-Path -LiteralPath $programGroup) { Remove-Item -LiteralPath $programGroup -Recurse -Force }
         $registry.DeleteSubKeyTree($uninstallKeyPath, $false)
