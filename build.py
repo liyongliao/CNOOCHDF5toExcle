@@ -67,6 +67,11 @@ def build_executable(argv=None):
     command.append(str(root / "desktop_entry.py"))
     subprocess.check_call(command, cwd=str(root))
     destination = root / "dist" if arguments.onefile else root / "dist" / "H5ToExcelConverter"
+    # Some upstream theme wheels contain Finder metadata. It has no runtime
+    # purpose and should not become part of the Windows directory distribution.
+    if not arguments.onefile:
+        for metadata_file in destination.rglob(".DS_Store"):
+            metadata_file.unlink()
     shutil.copyfile(root / "README.md", destination / "使用说明.md")
     shutil.copyfile(root / "软件文件说明.txt", destination / "软件文件说明.txt")
     copy_licenses(destination)
